@@ -1,0 +1,36 @@
+# Binaries
+docktor
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go build artifacts
+*.test
+*.out
+/vendor/
+
+# Environment files
+.env
+.env.*
+!.env.example
+!.env.cagent.example
+
+# Logs
+*.log
+/tmp/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docktor specific
+.env.cagent
+/tmp/docktor-daemon.log

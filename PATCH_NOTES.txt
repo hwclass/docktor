@@ -1,0 +1,18 @@
+PATCH SUMMARY
+
+1) examples/docker-compose.yaml
+   - Added a Docker `models:` block with model `ai/smollm2`.
+   - Bound the model to service `lb` so Compose injects `LLM_URL` / `LLM_MODEL` env vars.
+
+2) agents/docktor.dmr.yaml (NEW)
+   - Agent definition that uses `model: openai/ai/smollm2`.
+   - Works with Docker Model Runner via OpenAI-compatible API (`OPENAI_BASE_URL`).
+
+3) cmd/docktor/main.go
+   - Enhanced `docktor ai up` to:
+     * Build MCP binary, bring up Compose (unchanged behavior).
+     * Detect Docker Model Runner by reading `LLM_URL` from `lb` container env.
+     * If present: generate `.env.cagent` with `OPENAI_BASE_URL` and dummy key; run `agents/docktor.dmr.yaml`.
+     * Else: fall back to existing PoC behavior (requires `OPENAI_API_KEY`).
+
+See diagram.md for the flowchart.

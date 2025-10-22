@@ -1,0 +1,31 @@
+services:
+  lb:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      # Mount the single config file directly:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      # (optional) if you have extra conf snippets, mount that dir too; otherwise remove this line:
+      # - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      - web
+    # Bind the LLM model to this service so Compose injects LLM_URL / LLM_MODEL
+    models:
+      - llm
+
+  web:
+    image: nginx:alpine
+    expose:
+      - "80"
+
+  redis:
+    image: redis:alpine
+
+models:
+  llm:
+    # Use a compact OSS model shipped by Docker Model Runner (adjust as desired)
+    model: ai/smollm2
+    context_size: 4096
+    runtime_flags:
+      - "--no-prefill-assistant"
