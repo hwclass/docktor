@@ -290,7 +290,7 @@ OPENAI_MODEL=gpt-4
 
 ### Monitoring Window
 
-The agent uses a 30-second rolling window for CPU metrics. This is configured in the instruction via `window_sec: 30`.
+The agent uses a 10-second rolling window for CPU metrics. This is configured in the instruction via `window_sec: 10`.
 
 ### Compose File
 
