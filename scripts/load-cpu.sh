@@ -4,7 +4,7 @@ set -euo pipefail
 # Generate actual CPU load by running stress inside the web containers
 # This will make the containers consume real CPU so autoscaling triggers
 
-echo "Generating CPU load on web containers for 40 seconds..."
+echo "Generating CPU load on web containers for 90 seconds..."
 echo "This will trigger autoscaling from 2 → 5 replicas"
 echo
 
@@ -27,17 +27,17 @@ echo
 echo "Starting CPU stress (80% load per container)..."
 echo "$WEB_CONTAINERS" | while read -r cid; do
   # Install and run stress-ng to consume CPU
-  docker exec -d "$cid" sh -c 'apk add --no-cache stress-ng >/dev/null 2>&1 && stress-ng --cpu 1 --cpu-load 80 --timeout 40s' 2>/dev/null || \
+  docker exec -d "$cid" sh -c 'apk add --no-cache stress-ng >/dev/null 2>&1 && stress-ng --cpu 1 --cpu-load 80 --timeout 90s' 2>/dev/null || \
   docker exec -d "$cid" sh -c 'yes > /dev/null' &  # Fallback: simple CPU burner
 done
 
-echo "✓ CPU stress started (will run for 40 seconds)"
+echo "✓ CPU stress started (will run for 90 seconds)"
 echo "Watch in another terminal: bash scripts/watch.sh"
 echo "Or check logs: tail -f /tmp/docktor-autoscale.log"
 echo
 
 # Wait for stress to complete
-for i in {1..40}; do
+for i in {1..90}; do
   echo -n "."
   sleep 1
 done
