@@ -56,22 +56,38 @@ func printBanner() {
 func usage() {
 	fmt.Println(`docktor CLI
 Usage:
+  docktor daemon <start|stop|status|logs> [options]
   docktor ai up [--debug] [--no-install] [--skip-compose] [--headless]
 
 Commands:
-  ai up     Launch AI autoscaling agent
+  daemon    Autonomous autoscaling daemon
+    start   Start daemon (autonomous by default)
+            --manual: Require approval for each action
+            --compose-file: Path to compose file (default: examples/docker-compose.yaml)
+            --service: Service name to monitor (default: web)
+    stop    Stop running daemon
+    status  Check daemon status
+    logs    Follow daemon logs
+
+  ai up     Launch AI autoscaling agent (legacy interactive mode)
             --debug: Enable verbose logging
             --headless: Run autoscaling loop without TUI
             --no-install: Skip automatic cagent installation
             --skip-compose: Skip docker compose up/down (agent monitors existing containers)
 
 Examples:
-  # Full lifecycle: start containers + run agent + cleanup on exit
-  docktor ai up
+  # Start autonomous daemon (default - auto-approves all actions)
+  docktor daemon start
 
-  # Monitor existing containers (no lifecycle management)
-  docker compose -f examples/docker-compose.yaml up -d --scale web=2
-  docktor ai up --skip-compose
+  # Start manual daemon (requires user approval)
+  docktor daemon start --manual
+
+  # Monitor custom compose file and service
+  docktor daemon start --compose-file ./docker-compose.prod.yaml --service api
+
+  # Check daemon status and logs
+  docktor daemon status
+  docktor daemon logs
 
 Internal:
   docktor mcp
@@ -83,6 +99,12 @@ type opts struct {
 	noInstall   bool
 	skipCompose bool
 	headless    bool
+}
+
+type daemonOpts struct {
+	manual      bool
+	composeFile string
+	service     string
 }
 
 func parseFlags(args []string) opts {
@@ -102,12 +124,49 @@ func parseFlags(args []string) opts {
 	return o
 }
 
+func parseDaemonFlags(args []string) daemonOpts {
+	const (
+		defaultComposeFile = "examples/docker-compose.yaml"
+		defaultService     = "web"
+	)
+
+	opts := daemonOpts{
+		composeFile: defaultComposeFile,
+		service:     defaultService,
+	}
+
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+		switch arg {
+		case "--manual":
+			opts.manual = true
+		case "--compose-file":
+			if idx+1 < len(args) {
+				opts.composeFile = args[idx+1]
+				idx++
+			}
+		case "--service":
+			if idx+1 < len(args) {
+				opts.service = args[idx+1]
+				idx++
+			}
+		}
+	}
+	return opts
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		return
 	}
 	switch os.Args[1] {
+	case "daemon":
+		if len(os.Args) < 3 {
+			usage()
+			return
+		}
+		runDaemon(os.Args[2], os.Args[3:])
 	case "ai":
 		if len(os.Args) < 3 || os.Args[2] != "up" {
 			usage()
@@ -118,6 +177,28 @@ func main() {
 		runMCP()
 	default:
 		usage()
+	}
+}
+
+func runDaemon(action string, args []string) {
+	const (
+		pidFile = "/tmp/docktor-daemon.pid"
+		logFile = "/tmp/docktor-daemon.log"
+	)
+
+	switch action {
+	case "start":
+		daemonStart(args, pidFile, logFile)
+	case "stop":
+		daemonStop(pidFile)
+	case "status":
+		daemonStatus(pidFile, logFile)
+	case "logs":
+		daemonLogs(logFile)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown daemon action: %s\n", action)
+		usage()
+		os.Exit(1)
 	}
 }
 
@@ -578,6 +659,207 @@ func runMCP() {
 			}
 		}
 	}
+}
+
+func daemonStart(args []string, pidFile, logFile string) {
+	opts := parseDaemonFlags(args)
+
+	// Check if daemon is already running
+	if pidData, err := os.ReadFile(pidFile); err == nil {
+		pid := strings.TrimSpace(string(pidData))
+		if checkProcess(pid) {
+			fmt.Fprintf(os.Stderr, "Daemon already running (PID %s)\n", pid)
+			os.Exit(1)
+		}
+	}
+
+	repoRoot, err := os.Getwd()
+	must(err)
+
+	// Resolve compose file path (support both relative and absolute paths)
+	composeFile := opts.composeFile
+	if !filepath.IsAbs(composeFile) {
+		composeFile = filepath.Join(repoRoot, composeFile)
+	}
+
+	if !fileExists(composeFile) {
+		fmt.Fprintf(os.Stderr, "Error: Compose file not found: %s\n", composeFile)
+		os.Exit(1)
+	}
+
+	envFile := filepath.Join(repoRoot, ".env.cagent")
+	agentDMR := filepath.Join(repoRoot, "agents", "docktor.dmr.yaml")
+	agentCloud := filepath.Join(repoRoot, "agents", "docktor.cloud.yaml")
+
+	printBanner()
+
+	// Check for cagent
+	if !hasBinary("cagent") {
+		fmt.Fprintln(os.Stderr, "Error: cagent not found. Install with: brew install cagent")
+		os.Exit(1)
+	}
+
+	// Start compose stack
+	fmt.Printf("Starting Docker Compose stack (%s)...\n", composeFile)
+	must(run("docker", "compose", "-f", composeFile, "up", "-d", "--scale", fmt.Sprintf("%s=2", opts.service)))
+
+	// Detect LLM backend
+	useDMR := probeURL(modelRunnerEngineURL) || probeURL(modelRunnerV1URL)
+	var agentFile string
+	if !fileExists(envFile) {
+		if useDMR {
+			content := fmt.Sprintf("OPENAI_BASE_URL=%s\nOPENAI_API_KEY=dummy\nOPENAI_MODEL=dmr/ai/llama3.2\n", modelRunnerBaseURL)
+			_ = os.WriteFile(envFile, []byte(content), 0644)
+			fmt.Println("▶ Using Docker Model Runner with Llama 3.2")
+		} else {
+			fmt.Fprintln(os.Stderr, "ERROR: No Docker Model Runner detected and no .env.cagent for Gateway/OpenAI.")
+			fmt.Fprintln(os.Stderr, "Create .env.cagent with:")
+			fmt.Fprintln(os.Stderr, "  OPENAI_BASE_URL=https://api.openai.com/v1 (or your gateway)")
+			fmt.Fprintln(os.Stderr, "  OPENAI_API_KEY=sk-...")
+			fmt.Fprintln(os.Stderr, "  OPENAI_MODEL=gpt-4")
+			_ = run("docker", "compose", "-f", composeFile, "down")
+			os.Exit(1)
+		}
+	}
+
+	if useDMR {
+		agentFile = agentDMR
+	} else {
+		agentFile = agentCloud
+	}
+
+	fmt.Println("\n=== Starting Docktor Daemon ===")
+	fmt.Printf("Mode: %s\n", map[bool]string{true: "MANUAL", false: "AUTONOMOUS"}[opts.manual])
+	fmt.Printf("Compose: %s\n", composeFile)
+	fmt.Printf("Service: %s\n", opts.service)
+	fmt.Printf("Agent: %s\n", filepath.Base(agentFile))
+	fmt.Printf("Log: %s\n\n", logFile)
+
+	// Prepare cagent command
+	cagentArgs := []string{"run", agentFile, "--agent", "docktor", "--env-from-file", envFile}
+	if !opts.manual {
+		cagentArgs = append(cagentArgs, "--yolo", "--tui=false")
+	}
+
+	// Create log file
+	logFh, err := os.Create(logFile)
+	must(err)
+
+	cmd := exec.Command("cagent", cagentArgs...)
+	cmd.Env = append(os.Environ(), "DOCKTOR_COMPOSE_FILE="+composeFile)
+	cmd.Stdout = logFh
+	cmd.Stderr = logFh
+
+	if !opts.manual {
+		// Autonomous mode: pipe continuous prompts
+		stdinPipe, err := cmd.StdinPipe()
+		must(err)
+		go func() {
+			defer stdinPipe.Close()
+			for {
+				fmt.Fprintln(stdinPipe, "Check and scale")
+				time.Sleep(10 * time.Second)
+			}
+		}()
+	} else {
+		cmd.Stdin = os.Stdin
+	}
+
+	must(cmd.Start())
+
+	// Write PID file
+	must(os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0644))
+
+	fmt.Printf("✓ Daemon started successfully\n")
+	fmt.Printf("  PID: %d\n", cmd.Process.Pid)
+	fmt.Printf("  Logs: tail -f %s\n\n", logFile)
+	fmt.Printf("Control:\n")
+	fmt.Printf("  docktor daemon status  # Check status\n")
+	fmt.Printf("  docktor daemon logs    # Follow logs\n")
+	fmt.Printf("  docktor daemon stop    # Stop daemon\n")
+
+	// Detach from parent and let it run in background
+	// The parent process will exit, child continues
+	go func() {
+		cmd.Wait()
+		os.Remove(pidFile)
+	}()
+}
+
+func daemonStop(pidFile string) {
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		fmt.Println("No daemon running (PID file not found)")
+		return
+	}
+
+	pid := strings.TrimSpace(string(pidData))
+	if !checkProcess(pid) {
+		fmt.Println("Daemon not running (stale PID file)")
+		os.Remove(pidFile)
+		return
+	}
+
+	fmt.Printf("Stopping daemon (PID %s)...\n", pid)
+	cmd := exec.Command("kill", pid)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to stop daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Wait for process to exit
+	for i := 0; i < 30; i++ {
+		if !checkProcess(pid) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Force kill if still running
+	if checkProcess(pid) {
+		fmt.Println("Daemon didn't stop gracefully, force killing...")
+		exec.Command("kill", "-9", pid).Run()
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	os.Remove(pidFile)
+	fmt.Println("✓ Daemon stopped")
+}
+
+func daemonStatus(pidFile, logFile string) {
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		fmt.Println("Status: NOT RUNNING")
+		return
+	}
+
+	pid := strings.TrimSpace(string(pidData))
+	if !checkProcess(pid) {
+		fmt.Println("Status: NOT RUNNING (stale PID file)")
+		return
+	}
+
+	fmt.Printf("Status: RUNNING\n")
+	fmt.Printf("  PID: %s\n", pid)
+	fmt.Printf("  Log: %s\n", logFile)
+	fmt.Println("\nRecent log entries:")
+	exec.Command("tail", "-20", logFile).Run()
+}
+
+func daemonLogs(logFile string) {
+	if !fileExists(logFile) {
+		fmt.Fprintf(os.Stderr, "Log file not found: %s\n", logFile)
+		os.Exit(1)
+	}
+	cmd := exec.Command("tail", "-f", logFile)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	must(cmd.Run())
+}
+
+func checkProcess(pid string) bool {
+	cmd := exec.Command("kill", "-0", pid)
+	return cmd.Run() == nil
 }
 
 func run(name string, args ...string) error {
