@@ -21,30 +21,23 @@ agents:
          detect_anomalies(metrics=<exact_metrics_object>, rules={cpu_high_pct: $DOCKTOR_CPU_HIGH, cpu_low_pct: $DOCKTOR_CPU_LOW})
          IMPORTANT: Pass the EXACT metrics object as-is, keep all numbers as numbers
 
-      4. Act on the recommendation using current_replicas from step 2:
+      4. Call calculate_target_replicas with the recommendation from step 3:
+         calculate_target_replicas(recommendation=<recommendation_from_step_3>, current_replicas=<from_step_2>)
+         This tool handles ALL the math and logic for you. It returns:
+         - action: "scale_up", "scale_down", or "hold"
+         - should_scale: true/false
+         - target_replicas: the calculated target number
 
-         - If recommendation is "scale_up":
-           * Check if current_replicas < $DOCKTOR_MAX_REPLICAS
-           * If yes:
-             - Calculate target = current_replicas + $DOCKTOR_SCALE_UP_BY
-             - If target > $DOCKTOR_MAX_REPLICAS, set target = $DOCKTOR_MAX_REPLICAS
-             - Call propose_scale(service="$DOCKTOR_SERVICE", target_replicas=target)
-             - Call apply_scale(service="$DOCKTOR_SERVICE", target_replicas=target, reason="cpu_high")
-           * If already at max: Log "Already at maximum replicas"
+      5. Act on the result from step 4:
 
-         - If recommendation is "scale_down":
-           * Check if current_replicas > $DOCKTOR_MIN_REPLICAS
-           * If yes:
-             - Calculate target = current_replicas - $DOCKTOR_SCALE_DOWN_BY
-             - If target < $DOCKTOR_MIN_REPLICAS, set target = $DOCKTOR_MIN_REPLICAS
-             - Call propose_scale(service="$DOCKTOR_SERVICE", target_replicas=target)
-             - Call apply_scale(service="$DOCKTOR_SERVICE", target_replicas=target, reason="cpu_low")
-           * If already at min: Log "Already at minimum replicas"
+         - If should_scale is true:
+           * Call propose_scale(service="$DOCKTOR_SERVICE", target_replicas=<target_from_step_4>)
+           * Call apply_scale(service="$DOCKTOR_SERVICE", target_replicas=<target_from_step_4>, reason=<action_from_step_4>)
 
-         - If recommendation is "hold":
-           * Log "Holding steady at {current_replicas} replicas"
+         - If should_scale is false:
+           * Log "Holding steady" with the reason
 
-      5. Print status in JSON format:
+      6. Print status in JSON format:
          {
            "timestamp": "<ISO8601>",
            "iteration": <number>,

@@ -525,6 +525,19 @@ func mcpToolsList(id json.RawMessage) {
 			},
 		},
 		{
+			Name:        "calculate_target_replicas",
+			Description: "Calculate target replicas based on scaling recommendation and current count. Handles all arithmetic logic per config.",
+			InputSchema: map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"recommendation":    map[string]interface{}{"type": "string", "enum": []string{"scale_up", "scale_down", "hold"}},
+					"current_replicas":  map[string]interface{}{"type": "integer"},
+				},
+				"required": []string{"recommendation", "current_replicas"},
+			},
+		},
+		{
 			Name:        "detect_anomalies",
 			Description: "Recommend scale_up/scale_down based on CPU thresholds",
 			InputSchema: map[string]interface{}{
@@ -626,6 +639,26 @@ func mcpToolsCall(id json.RawMessage, params json.RawMessage) {
 		writeRes(id, map[string]interface{}{
 			"content": []map[string]interface{}{
 				{"type": "text", "text": toJSON(map[string]interface{}{"current_replicas": count})},
+			},
+			"isError": false,
+		})
+	case "calculate_target_replicas":
+		var in struct {
+			Recommendation   string `json:"recommendation"`
+			CurrentReplicas  int    `json:"current_replicas"`
+		}
+		_ = json.Unmarshal(p.Arguments, &in)
+		log.Printf("[MCP] calculate_target_replicas(recommendation=%s, current_replicas=%d)", in.Recommendation, in.CurrentReplicas)
+		result, err := toolCalculateTargetReplicas(in.Recommendation, in.CurrentReplicas)
+		if err != nil {
+			log.Printf("[MCP] calculate_target_replicas ERROR: %v", err)
+			writeErr(id, 1, err.Error())
+			return
+		}
+		log.Printf("[MCP] calculate_target_replicas RESULT: %v", result)
+		writeRes(id, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": toJSON(result)},
 			},
 			"isError": false,
 		})
@@ -767,6 +800,60 @@ func toolGetCurrentReplicas(service string) (int, error) {
 	}
 
 	return count, nil
+}
+
+func toolCalculateTargetReplicas(recommendation string, currentReplicas int) (map[string]interface{}, error) {
+	// Get config values from environment
+	minReplicas, _ := strconv.Atoi(os.Getenv("DOCKTOR_MIN_REPLICAS"))
+	maxReplicas, _ := strconv.Atoi(os.Getenv("DOCKTOR_MAX_REPLICAS"))
+	scaleUpBy, _ := strconv.Atoi(os.Getenv("DOCKTOR_SCALE_UP_BY"))
+	scaleDownBy, _ := strconv.Atoi(os.Getenv("DOCKTOR_SCALE_DOWN_BY"))
+
+	var targetReplicas int
+	var action string
+	var shouldScale bool
+
+	switch recommendation {
+	case "scale_up":
+		if currentReplicas >= maxReplicas {
+			action = "hold"
+			shouldScale = false
+			targetReplicas = currentReplicas
+		} else {
+			targetReplicas = currentReplicas + scaleUpBy
+			if targetReplicas > maxReplicas {
+				targetReplicas = maxReplicas
+			}
+			action = "scale_up"
+			shouldScale = true
+		}
+	case "scale_down":
+		if currentReplicas <= minReplicas {
+			action = "hold"
+			shouldScale = false
+			targetReplicas = currentReplicas
+		} else {
+			targetReplicas = currentReplicas - scaleDownBy
+			if targetReplicas < minReplicas {
+				targetReplicas = minReplicas
+			}
+			action = "scale_down"
+			shouldScale = true
+		}
+	case "hold":
+		action = "hold"
+		shouldScale = false
+		targetReplicas = currentReplicas
+	default:
+		return nil, fmt.Errorf("unknown recommendation: %s", recommendation)
+	}
+
+	return map[string]interface{}{
+		"action":          action,
+		"should_scale":    shouldScale,
+		"target_replicas": targetReplicas,
+		"current_replicas": currentReplicas,
+	}, nil
 }
 
 func toolDetect(metrics map[string]float64, hi, lo float64) (string, string) {
