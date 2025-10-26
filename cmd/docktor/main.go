@@ -181,6 +181,12 @@ func LoadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("failed to parse config: %w", err)
 	}
 
+	// Resolve relative paths in config relative to config file location
+	configDir := filepath.Dir(path)
+	if !filepath.IsAbs(cfg.ComposeFile) {
+		cfg.ComposeFile = filepath.Join(configDir, cfg.ComposeFile)
+	}
+
 	// Validate
 	if cfg.Scaling.MinReplicas < 1 {
 		return cfg, fmt.Errorf("min_replicas must be >= 1")
