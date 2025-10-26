@@ -32,8 +32,8 @@ echo "$WEB_CONTAINERS" | while read -r cid; do
 done
 
 echo "✓ CPU stress started (will run for 90 seconds)"
-echo "Watch in another terminal: bash scripts/watch.sh"
-echo "Or check logs: tail -f /tmp/docktor-autoscale.log"
+echo "Watch in another terminal: bash examples/watch.sh"
+echo "Or check logs: ./docktor daemon logs"
 echo
 
 # Wait for stress to complete
