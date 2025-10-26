@@ -159,8 +159,17 @@ func DefaultConfig() Config {
 func LoadConfig(path string) (Config, error) {
 	cfg := DefaultConfig()
 
+	// Auto-discover config file if not specified
 	if path == "" {
-		return cfg, nil
+		// Check for docktor.yaml in current directory
+		if _, err := os.Stat("docktor.yaml"); err == nil {
+			path = "docktor.yaml"
+		} else if _, err := os.Stat("docktor.yml"); err == nil {
+			path = "docktor.yml"
+		} else {
+			// No config file found, use defaults
+			return cfg, nil
+		}
 	}
 
 	data, err := os.ReadFile(path)
@@ -829,6 +838,16 @@ func daemonStart(args []string, pidFile, logFile string) {
 		os.Exit(1)
 	}
 
+	// Track which config was loaded for logging
+	configSource := "built-in defaults"
+	if opts.configFile != "" {
+		configSource = opts.configFile
+	} else if _, err := os.Stat("docktor.yaml"); err == nil {
+		configSource = "docktor.yaml (auto-discovered)"
+	} else if _, err := os.Stat("docktor.yml"); err == nil {
+		configSource = "docktor.yml (auto-discovered)"
+	}
+
 	// Command-line flags override config
 	if opts.composeFile != "examples/docker-compose.yaml" {
 		cfg.ComposeFile = opts.composeFile
@@ -902,16 +921,15 @@ func daemonStart(args []string, pidFile, logFile string) {
 
 	fmt.Println("\n=== Starting Docktor Daemon ===")
 	fmt.Printf("Mode: %s\n", map[bool]string{true: "MANUAL", false: "AUTONOMOUS"}[opts.manual])
+	fmt.Printf("Config: %s\n", configSource)
 	fmt.Printf("Compose: %s\n", composeFile)
 	fmt.Printf("Service: %s\n", cfg.Service)
 	fmt.Printf("Agent: %s\n", filepath.Base(agentFile))
-	if opts.configFile != "" {
-		fmt.Printf("Config: %s\n", opts.configFile)
-	}
 	fmt.Printf("Log: %s\n", logFile)
 	fmt.Printf("\nScaling Config:\n")
 	fmt.Printf("  CPU Thresholds: %.0f%% (high) / %.0f%% (low)\n", cfg.Scaling.CPUHigh, cfg.Scaling.CPULow)
 	fmt.Printf("  Replicas: %d (min) / %d (max)\n", cfg.Scaling.MinReplicas, cfg.Scaling.MaxReplicas)
+	fmt.Printf("  Scale by: +%d / -%d replicas\n", cfg.Scaling.ScaleUpBy, cfg.Scaling.ScaleDownBy)
 	fmt.Printf("  Check Interval: %ds\n\n", cfg.Scaling.CheckInterval)
 
 	// Prepare cagent command template

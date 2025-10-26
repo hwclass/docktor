@@ -12,7 +12,7 @@ scaling:
   cpu_low: 10.0        # Be more conservative about scaling down
 
   min_replicas: 2      # Always keep 2 for HA
-  max_replicas: 10     # Demo limit
+  max_replicas: 7     # Don't need more
 
   scale_up_by: 2       # Scale up faster
   scale_down_by: 1     # Scale down conservatively

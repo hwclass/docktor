@@ -13,25 +13,37 @@ agents:
       1. Call get_metrics(container_regex="$DOCKTOR_SERVICE", window_sec=$DOCKTOR_METRICS_WINDOW)
          to collect current CPU metrics
 
-      2. Call detect_anomalies with the metrics from step 1:
+      2. Count current replicas by counting the number of containers in the metrics response
+         Example: if metrics = {"web-1": 45.2, "web-2": 50.3}, then current_replicas = 2
+
+      3. Call detect_anomalies with the metrics from step 1:
          detect_anomalies(metrics=<exact_metrics_object>, rules={cpu_high_pct: $DOCKTOR_CPU_HIGH, cpu_low_pct: $DOCKTOR_CPU_LOW})
          IMPORTANT: Pass the EXACT metrics object as-is, keep all numbers as numbers
 
-      3. Act on the recommendation:
-         - If "scale_up" AND current_replicas < $DOCKTOR_MAX_REPLICAS:
-           * Calculate: target = min(current_replicas + $DOCKTOR_SCALE_UP_BY, $DOCKTOR_MAX_REPLICAS)
-           * Call: propose_scale(service="$DOCKTOR_SERVICE", target_replicas=target)
-           * Call: apply_scale(service="$DOCKTOR_SERVICE", target_replicas=target, reason="cpu_high")
+      4. Act on the recommendation based on current_replicas from step 2:
 
-         - If "scale_down" AND current_replicas > $DOCKTOR_MIN_REPLICAS:
-           * Calculate: target = max(current_replicas - $DOCKTOR_SCALE_DOWN_BY, $DOCKTOR_MIN_REPLICAS)
-           * Call: propose_scale(service="$DOCKTOR_SERVICE", target_replicas=target)
-           * Call: apply_scale(service="$DOCKTOR_SERVICE", target_replicas=target, reason="cpu_low")
+         - If recommendation is "scale_up":
+           * Check if current_replicas < $DOCKTOR_MAX_REPLICAS
+           * If yes:
+             - Add $DOCKTOR_SCALE_UP_BY to current_replicas
+             - Cap at $DOCKTOR_MAX_REPLICAS (use the smaller value)
+             - Call propose_scale(service="$DOCKTOR_SERVICE", target_replicas=<calculated_target>)
+             - Call apply_scale(service="$DOCKTOR_SERVICE", target_replicas=<calculated_target>, reason="cpu_high")
+           * If already at max: Log "Already at maximum replicas"
 
-         - If "hold":
-           * Log: "Holding steady at {current_replicas} replicas"
+         - If recommendation is "scale_down":
+           * Check if current_replicas > $DOCKTOR_MIN_REPLICAS
+           * If yes:
+             - Subtract $DOCKTOR_SCALE_DOWN_BY from current_replicas
+             - Floor at $DOCKTOR_MIN_REPLICAS (use the larger value)
+             - Call propose_scale(service="$DOCKTOR_SERVICE", target_replicas=<calculated_target>)
+             - Call apply_scale(service="$DOCKTOR_SERVICE", target_replicas=<calculated_target>, reason="cpu_low")
+           * If already at min: Log "Already at minimum replicas"
 
-      4. Print status in JSON format:
+         - If recommendation is "hold":
+           * Log "Holding steady at {current_replicas} replicas"
+
+      5. Print status in JSON format:
          {
            "timestamp": "<ISO8601>",
            "iteration": <number>,
