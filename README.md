@@ -17,49 +17,62 @@
 
 **Prerequisites**: Docker Desktop + Model Runner, cagent, Go 1.21+ (see [Installation](#installation))
 
+### Autonomous Daemon Mode (Recommended)
+
+For fully autonomous 24/7 operation - no user intervention required:
+
 ```bash
 # 1. Clone and build
 git clone https://github.com/hwclass/docktor
 cd docktor
 go build -o docktor ./cmd/docktor
 
-# 2. Run Docktor (opens cagent TUI)
-./docktor ai up
-
-# In the TUI, send a message to start autoscaling:
-# Type: "Start autoscaling web service now"
+# 2. Start autonomous daemon (auto-scales automatically)
+./docktor daemon start
 
 # 3. Generate load to trigger scaling (in another terminal)
-bash scripts/load-cpu.sh
+bash examples/load-cpu.sh
 
-# 4. Watch containers scale automatically
-bash scripts/watch.sh
+# 4. Monitor daemon in real-time
+./docktor daemon logs
+
+# 5. Check status
+./docktor daemon status
+
+# 6. Stop daemon when done
+./docktor daemon stop
 ```
 
-### Alternative: Background Daemon Mode (Persistent)
+**Advanced Options:**
+```bash
+# Custom compose file and service
+./docktor daemon start --compose-file ./production.yaml --service api
 
-For truly autonomous 24/7 operation without TUI:
+# Manual mode (requires approval for each action)
+./docktor daemon start --manual
+```
+
+### Interactive Mode (For Learning)
+
+For interactive exploration with chat interface - user intervention required:
 
 ```bash
-# Autonomous mode (default - auto-approves all actions)
-bash scripts/daemon.sh start
+# 1. Run Docktor (opens cagent TUI)
+./docktor ai up
 
-# Manual mode (requires user approval for each action)
-bash scripts/daemon.sh start --manual
+# 2. In the TUI, send a message to start autoscaling:
+# Type: "Start autoscaling web service now"
 
-# Monitor in real-time
-tail -f /tmp/docktor-daemon.log
+# 3. Generate load (in another terminal)
+bash examples/load-cpu.sh
 
-# Check status
-bash scripts/daemon.sh status
-
-# Stop daemon
-bash scripts/daemon.sh stop
+# 4. Watch containers scale
+bash examples/watch.sh
 ```
 
-**Modes:**
-- **Autonomous (default)**: Monitors every 10s and scales automatically without user approval
-- **Manual (`--manual`)**: Waits for user approval before each scaling action
+**Mode Comparison:**
+- **Daemon (Recommended)**: Fully autonomous, runs in background, no user input needed
+- **Interactive**: Manual chat interface, good for learning how decisions are made
 
 📖 **Full testing guide**: See [AUTOSCALE_GUIDE.md](AUTOSCALE_GUIDE.md)
 
