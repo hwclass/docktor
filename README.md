@@ -34,8 +34,8 @@ go build -o docktor ./cmd/docktor
 # Option A: Incremental load simulator (recommended for demos)
 bash examples/load-incremental.sh
 
-# Option B: Instant high load (quick test)
-bash examples/load-cpu.sh
+# Option B: Quick test - instant high load (90 seconds)
+bash examples/load-quick.sh
 
 # 4. Monitor daemon in real-time
 ./docktor daemon logs

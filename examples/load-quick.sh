@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Generate actual CPU load by running stress inside the web containers
-# This will make the containers consume real CPU so autoscaling triggers
+# Quick CPU load test - instant 80% load for 90 seconds
+# For demos, use load-incremental.sh instead (shows gradual scaling)
 
-echo "Generating CPU load on web containers for 90 seconds..."
-echo "This will trigger autoscaling from 2 → 5 replicas"
+echo "⚡ Quick Load Test - Instant 80% CPU"
+echo "======================================"
+echo "Duration: 90 seconds"
+echo "For gradual demo: use load-incremental.sh"
 echo
 
 # Get all web container IDs
