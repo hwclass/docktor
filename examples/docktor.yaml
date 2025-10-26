@@ -9,13 +9,13 @@ compose_file: docker-compose.yaml
 scaling:
   # More aggressive thresholds for demo
   cpu_high: 70.0       # Scale up earlier
-  cpu_low: 25.0        # Be more conservative about scaling down
+  cpu_low: 10.0        # Be more conservative about scaling down
 
   min_replicas: 2      # Always keep 2 for HA
-  max_replicas: 8      # Demo limit
+  max_replicas: 10     # Demo limit
 
-  scale_up_by: 3       # Scale up faster
+  scale_up_by: 2       # Scale up faster
   scale_down_by: 1     # Scale down conservatively
 
-  check_interval: 10   # Check every 10 seconds
-  metrics_window: 10   # Quick response to load changes
+  check_interval: 5    # Check every 10 seconds
+  metrics_window: 5    # Quick response to load changes
