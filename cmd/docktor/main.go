@@ -914,18 +914,13 @@ func daemonStart(args []string, pidFile, logFile string) {
 	fmt.Printf("  Replicas: %d (min) / %d (max)\n", cfg.Scaling.MinReplicas, cfg.Scaling.MaxReplicas)
 	fmt.Printf("  Check Interval: %ds\n\n", cfg.Scaling.CheckInterval)
 
-	// Prepare cagent command
+	// Prepare cagent command template
 	cagentArgs := []string{"run", agentFile, "--agent", "docktor", "--env-from-file", envFile}
 	if !opts.manual {
 		cagentArgs = append(cagentArgs, "--yolo", "--tui=false")
 	}
 
-	// Create log file
-	logFh, err := os.Create(logFile)
-	must(err)
-
-	cmd := exec.Command("cagent", cagentArgs...)
-	cmd.Env = append(os.Environ(),
+	cagentEnv := append(os.Environ(),
 		"DOCKTOR_COMPOSE_FILE="+composeFile,
 		fmt.Sprintf("DOCKTOR_SERVICE=%s", cfg.Service),
 		fmt.Sprintf("DOCKTOR_CPU_HIGH=%.0f", cfg.Scaling.CPUHigh),
@@ -936,44 +931,85 @@ func daemonStart(args []string, pidFile, logFile string) {
 		fmt.Sprintf("DOCKTOR_SCALE_DOWN_BY=%d", cfg.Scaling.ScaleDownBy),
 		fmt.Sprintf("DOCKTOR_METRICS_WINDOW=%d", cfg.Scaling.MetricsWindow),
 	)
-	cmd.Stdout = logFh
-	cmd.Stderr = logFh
 
-	if !opts.manual {
-		// Autonomous mode: pipe continuous prompts
-		stdinPipe, err := cmd.StdinPipe()
-		must(err)
-		checkInterval := time.Duration(cfg.Scaling.CheckInterval) * time.Second
+	// Create log file
+	logFh, err := os.Create(logFile)
+	must(err)
+
+	if opts.manual {
+		// Manual mode: single interactive session
+		cmd := exec.Command("cagent", cagentArgs...)
+		cmd.Env = cagentEnv
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = logFh
+		cmd.Stderr = logFh
+
+		must(cmd.Start())
+		must(os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0644))
+
+		fmt.Printf("✓ Daemon started successfully\n")
+		fmt.Printf("  PID: %d\n", cmd.Process.Pid)
+		fmt.Printf("  Logs: tail -f %s\n\n", logFile)
+
 		go func() {
-			defer stdinPipe.Close()
+			cmd.Wait()
+			os.Remove(pidFile)
+		}()
+	} else {
+		// Autonomous mode: restart cagent fresh each interval
+		// This ensures the model processes each check as a new session
+		checkInterval := time.Duration(cfg.Scaling.CheckInterval) * time.Second
+		prompt := fmt.Sprintf(`Perform scaling check:
+1. get_metrics(container_regex="%s", window_sec=%d)
+2. detect_anomalies(metrics, rules={cpu_high_pct: %.0f, cpu_low_pct: %.0f})
+3. Act on recommendation (scale if needed, within min=%d max=%d)
+4. Print JSON status update`,
+			cfg.Service, cfg.Scaling.MetricsWindow,
+			cfg.Scaling.CPUHigh, cfg.Scaling.CPULow,
+			cfg.Scaling.MinReplicas, cfg.Scaling.MaxReplicas)
+
+		// Start supervisor loop in background
+		go func() {
+			iteration := 0
 			for {
-				fmt.Fprintln(stdinPipe, "Check and scale")
+				iteration++
+				fmt.Fprintf(logFh, "\n=== Iteration %d ===\n", iteration)
+				logFh.Sync()
+
+				cmd := exec.Command("cagent", cagentArgs...)
+				cmd.Env = cagentEnv
+				cmd.Stdin = strings.NewReader(prompt)
+				cmd.Stdout = logFh
+				cmd.Stderr = logFh
+
+				cmd.Run() // Run and wait for completion
+
+				// Wait before next check
 				time.Sleep(checkInterval)
 			}
 		}()
-	} else {
-		cmd.Stdin = os.Stdin
+
+		// Write a placeholder PID (the supervisor goroutine's parent)
+		must(os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644))
+
+		fmt.Printf("✓ Daemon started successfully\n")
+		fmt.Printf("  PID: %d (supervisor)\n", os.Getpid())
+		fmt.Printf("  Logs: tail -f %s\n\n", logFile)
+		fmt.Printf("  Mode: Restarting cagent every %ds\n\n", cfg.Scaling.CheckInterval)
+
+		fmt.Printf("Control:\n")
+		fmt.Printf("  docktor daemon status  # Check status\n")
+		fmt.Printf("  docktor daemon logs    # Follow logs\n")
+		fmt.Printf("  docktor daemon stop    # Stop daemon\n")
+
+		// Block forever - the supervisor loop runs in background
+		select {}
 	}
 
-	must(cmd.Start())
-
-	// Write PID file
-	must(os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0644))
-
-	fmt.Printf("✓ Daemon started successfully\n")
-	fmt.Printf("  PID: %d\n", cmd.Process.Pid)
-	fmt.Printf("  Logs: tail -f %s\n\n", logFile)
 	fmt.Printf("Control:\n")
 	fmt.Printf("  docktor daemon status  # Check status\n")
 	fmt.Printf("  docktor daemon logs    # Follow logs\n")
 	fmt.Printf("  docktor daemon stop    # Stop daemon\n")
-
-	// Detach from parent and let it run in background
-	// The parent process will exit, child continues
-	go func() {
-		cmd.Wait()
-		os.Remove(pidFile)
-	}()
 }
 
 func daemonStop(pidFile string) {
