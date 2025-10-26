@@ -31,6 +31,10 @@ go build -o docktor ./cmd/docktor
 ./docktor daemon start
 
 # 3. Generate load to trigger scaling (in another terminal)
+# Option A: Incremental load simulator (recommended for demos)
+bash examples/load-incremental.sh
+
+# Option B: Instant high load (quick test)
 bash examples/load-cpu.sh
 
 # 4. Monitor daemon in real-time
