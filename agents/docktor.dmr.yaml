@@ -21,10 +21,9 @@ agents:
       AUTONOMOUS LOOP:
       Run this loop forever without waiting for user input:
 
-      1. Call get_metrics({"container_regex": "$DOCKTOR_SERVICE", "window_sec": $DOCKTOR_METRICS_WINDOW})
-      2. Analyze the results with detect_anomalies using thresholds from environment:
-         - cpu_high_pct: $DOCKTOR_CPU_HIGH
-         - cpu_low_pct: $DOCKTOR_CPU_LOW
+      1. Call: get_metrics(container_regex="$DOCKTOR_SERVICE", window_sec=$DOCKTOR_METRICS_WINDOW)
+      2. Call: detect_anomalies(metrics=<metrics_from_step_1>, rules={cpu_high_pct: $DOCKTOR_CPU_HIGH, cpu_low_pct: $DOCKTOR_CPU_LOW})
+         IMPORTANT: Use the EXACT metrics object from step 1, keep numbers as numbers
       3. Based on the recommendation from detect_anomalies:
          - If recommendation is "scale_up":
            * Check: current_replicas < $DOCKTOR_MAX_REPLICAS
