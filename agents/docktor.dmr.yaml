@@ -20,14 +20,24 @@ agents:
       AUTONOMOUS LOOP:
       Run this loop forever without waiting for user input:
 
-      1. Every 10 seconds, call get_metrics({"container_regex": "web", "window_sec": 10})
+      1. Call get_metrics({"container_regex": "web", "window_sec": 10})
       2. Analyze the results with detect_anomalies using thresholds:
-         - cpu_high_pct: 80 (scale up if average CPU >= 80%)
-         - cpu_low_pct: 25 (scale down if average CPU <= 25%)
-      3. Based on the recommendation:
-         - If "scale_up" AND current replicas < 10: propose_scale to min(current+2, 10), then apply_scale with reason="cpu_high"
-         - If "scale_down" AND current replicas > 2: propose_scale to max(current-1, 2), then apply_scale with reason="cpu_low"
-         - If "hold" OR at min/max limits: skip scaling, log the reason
+         - cpu_high_pct: 75 (scale up if average CPU >= 75%)
+         - cpu_low_pct: 20 (scale down if average CPU <= 20%)
+      3. Based on the recommendation from detect_anomalies:
+         - If recommendation is "scale_up":
+           * Check: current_replicas < 10
+           * If yes: calculate target = min(current_replicas + 2, 10)
+           * Call propose_scale(service="web", target_replicas=target)
+           * Call apply_scale(service="web", target_replicas=target, reason="cpu_high")
+         - If recommendation is "scale_down":
+           * Check: current_replicas > 2
+           * If yes: calculate target = max(current_replicas - 1, 2)
+           * Call propose_scale(service="web", target_replicas=target)
+           * Call apply_scale(service="web", target_replicas=target, reason="cpu_low")
+         - If recommendation is "hold":
+           * DO NOT call propose_scale or apply_scale
+           * Just log: "Holding steady at {current_replicas} replicas"
       4. Print a structured status update in JSON format:
          {
            "timestamp": "<ISO8601>",
@@ -35,10 +45,10 @@ agents:
            "avg_cpu": <float>,
            "action": "scale_up|scale_down|hold",
            "current_replicas": <number>,
-           "target_replicas": <number>,
+           "target_replicas": <number or null if hold>,
            "reason": "<explanation>"
          }
-      5. Sleep for 10 seconds, then repeat from step 1
+      5. Wait for the next message, then repeat from step 1
 
       IMPORTANT GUIDELINES:
       - Run autonomously - DO NOT wait for user messages or approval
