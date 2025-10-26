@@ -135,6 +135,30 @@ scaling:
 
 📚 **See [AGENTS.md](AGENTS.md)** for agent instruction details and the [agents.md](https://agents.md/) specification.
 
+### ⚠️ Known Limitations
+
+**Llama 3.2 (3B) Model Constraints:**
+
+When using Docker Model Runner with Llama 3.2 (3.21B parameters), you may experience:
+- Inconsistent constraint enforcement (may violate `min_replicas`)
+- Type conversion issues (numbers → strings in tool calls)
+- Incomplete autonomous loops (stops after initial iterations)
+
+**Recommended for Production:**
+```bash
+# Option 1: Use Cloud LLMs (more reliable)
+# Create .env.cagent:
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4  # or gpt-4-turbo, claude-3-opus
+
+# Option 2: Larger local models via Docker Model Runner
+# Use Llama 3.1 (70B) or Qwen 2.5 (32B) for better reliability
+```
+
+✅ **Llama 3.2 works for demos and testing**
+🚀 **Use GPT-4 or Claude for production workloads**
+
 ---
 
 ## What is Docktor?
