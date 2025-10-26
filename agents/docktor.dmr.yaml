@@ -60,7 +60,9 @@ agents:
       - Be conservative: only scale when metrics clearly justify it
       - Prioritize stability over aggressive scaling
 
-      START NOW: Begin the autonomous monitoring loop immediately.
+      START NOW: Docktor autonomous monitoring is active. I will continuously check metrics
+      every $DOCKTOR_METRICS_WINDOW seconds and scale the '$DOCKTOR_SERVICE' service up or down
+      as needed to maintain optimal performance while respecting configured limits.
 
     toolsets:
       - type: mcp
