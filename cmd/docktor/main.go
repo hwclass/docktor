@@ -740,6 +740,61 @@ func runMCP() {
 	}
 }
 
+// generateAgentConfig creates a runtime agent config with substituted config values
+func generateAgentConfig(sourceFile, targetFile string, cfg Config) error {
+	// Read source agent file
+	data, err := os.ReadFile(sourceFile)
+	if err != nil {
+		return fmt.Errorf("failed to read agent file: %w", err)
+	}
+
+	// Parse YAML
+	var agentYAML map[string]interface{}
+	if err := yaml.Unmarshal(data, &agentYAML); err != nil {
+		return fmt.Errorf("failed to parse agent YAML: %w", err)
+	}
+
+	// Navigate to docktor agent instruction
+	agents, ok := agentYAML["agents"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("invalid agent file: missing agents section")
+	}
+
+	docktor, ok := agents["docktor"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("invalid agent file: missing docktor agent")
+	}
+
+	instruction, ok := docktor["instruction"].(string)
+	if !ok {
+		return fmt.Errorf("invalid agent file: missing instruction")
+	}
+
+	// Substitute config values into instruction
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_SERVICE", cfg.Service)
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_METRICS_WINDOW", fmt.Sprintf("%d", cfg.Scaling.MetricsWindow))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_CPU_HIGH", fmt.Sprintf("%.0f", cfg.Scaling.CPUHigh))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_CPU_LOW", fmt.Sprintf("%.0f", cfg.Scaling.CPULow))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_MIN_REPLICAS", fmt.Sprintf("%d", cfg.Scaling.MinReplicas))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_MAX_REPLICAS", fmt.Sprintf("%d", cfg.Scaling.MaxReplicas))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_SCALE_UP_BY", fmt.Sprintf("%d", cfg.Scaling.ScaleUpBy))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_SCALE_DOWN_BY", fmt.Sprintf("%d", cfg.Scaling.ScaleDownBy))
+
+	docktor["instruction"] = instruction
+
+	// Write modified config
+	output, err := yaml.Marshal(agentYAML)
+	if err != nil {
+		return fmt.Errorf("failed to marshal YAML: %w", err)
+	}
+
+	if err := os.WriteFile(targetFile, output, 0644); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	return nil
+}
+
 func daemonStart(args []string, pidFile, logFile string) {
 	opts := parseDaemonFlags(args)
 
@@ -821,6 +876,14 @@ func daemonStart(args []string, pidFile, logFile string) {
 	} else {
 		agentFile = agentCloud
 	}
+
+	// Generate runtime agent config with substituted values
+	runtimeAgentFile := filepath.Join(repoRoot, ".docktor-agent-runtime.yaml")
+	if err := generateAgentConfig(agentFile, runtimeAgentFile, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating agent config: %v\n", err)
+		os.Exit(1)
+	}
+	agentFile = runtimeAgentFile
 
 	fmt.Println("\n=== Starting Docktor Daemon ===")
 	fmt.Printf("Mode: %s\n", map[bool]string{true: "MANUAL", false: "AUTONOMOUS"}[opts.manual])
