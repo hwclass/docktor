@@ -7,12 +7,19 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 COMPOSE_FILE="$ROOT/examples/docker-compose.yaml"
 ENV_FILE="$ROOT/.env.cagent"
-AGENT_FILE="$ROOT/agents/docktor-daemon.yaml"
 LOG_FILE="${DOCKTOR_LOG_FILE:-/tmp/docktor-daemon.log}"
 PID_FILE="/tmp/docktor-daemon.pid"
 
-# No need for .env.cagent when using DMR provider!
-# The agent config uses "model: dmr/ai/smollm2" which points directly to Docker Model Runner
+# Parse flags
+MANUAL_MODE=false
+for arg in "$@"; do
+  case $arg in
+    --manual)
+      MANUAL_MODE=true
+      shift
+      ;;
+  esac
+done
 
 export DOCKTOR_COMPOSE_FILE="$COMPOSE_FILE"
 
@@ -20,58 +27,8 @@ export DOCKTOR_COMPOSE_FILE="$COMPOSE_FILE"
 echo "Building docktor binary..."
 (cd "$ROOT" && go build -o docktor ./cmd/docktor)
 
-# Create agent config with absolute paths (cagent changes to agent dir)
-TEMP_AGENT="/tmp/docktor-daemon-abs.yaml"
-cat > "$TEMP_AGENT" <<EOF
-version: "2"
-agents:
-  docktor:
-    model: dmr/ai/llama3.2
-    description: "Autonomous SRE agent"
-    instruction: |
-      You are an autonomous SRE agent running in CONTINUOUS DAEMON MODE.
-
-      Your job is to run an infinite monitoring loop. NEVER stop. NEVER exit.
-      After each iteration, IMMEDIATELY start the next one.
-
-      INFINITE LOOP - Execute these steps repeatedly without stopping:
-
-      STEP 1: Call get_metrics(container_regex="web", window_sec=30)
-
-      STEP 2: Analyze the metrics you received. Calculate:
-        - Current replica count (number of containers in metrics)
-        - Average CPU% across all containers
-
-      STEP 3: Decide on scaling action based on average CPU:
-
-        - If avg_cpu > 80%:
-          target_replicas = current_replicas + 2
-          Call apply_scale(service="web", target_replicas=target_replicas, reason="CPU high at X%, scaling up")
-
-        - If avg_cpu < 20%:
-          target_replicas = max(1, current_replicas - 1)
-          Call apply_scale(service="web", target_replicas=target_replicas, reason="CPU low at X%, scaling down")
-
-        - If 20% ≤ avg_cpu ≤ 80%:
-          Print "CPU healthy at X%, no scaling needed"
-
-      STEP 4: Print "Iteration N complete" then GOTO STEP 1
-
-      REPEAT STEPS 1-4 FOREVER. Never stop. Never exit.
-
-      CRITICAL RULES:
-      - NEVER stop or exit
-      - NO waiting between iterations (check continuously)
-      - If you complete one iteration, IMMEDIATELY start the next
-      - Keep running until killed
-
-      Start the infinite loop NOW!
-    toolsets:
-      - type: mcp
-        command: $ROOT/scripts/mcp-debug.sh
-        args: []
-EOF
-AGENT_FILE="$TEMP_AGENT"
+# Use the proper agent file with absolute paths (cagent changes to agent dir)
+AGENT_FILE="$ROOT/agents/docktor.dmr.yaml"
 
 case "${1:-start}" in
   start)
@@ -91,21 +48,37 @@ case "${1:-start}" in
     echo "Ensuring Docker Compose stack is running..."
     docker compose -f "$COMPOSE_FILE" up -d --scale web=2
 
-    echo "Starting autonomous AI agent (cagent + Docker Model Runner)..."
-    echo "The agent will run continuously in the background."
-    echo
+    if [[ "$MANUAL_MODE" == "true" ]]; then
+      echo "Starting AI agent in MANUAL mode (requires user approval for actions)..."
+      echo "The agent will wait for your input in the TUI."
+      echo
 
-    # Launch cagent in daemon mode with:
-    # --tui=false: Disable Terminal UI (headless mode)
-    # --yolo: Auto-approve all tool calls (autonomous mode)
-    # model: dmr/ai/smollm2 uses Docker Model Runner (no API keys needed!)
-    # Pipe initial message to trigger the agent immediately
-    echo "Start the autonomous autoscaling loop now. Monitor the 'web' service continuously." | \
-    nohup cagent run "$AGENT_FILE" \
-      --agent docktor \
-      --tui=false \
-      --yolo \
-      > "$LOG_FILE" 2>&1 &
+      # Launch cagent in manual/interactive mode
+      echo "Start monitoring and autoscaling the 'web' service. Check metrics and scale when needed." | \
+      nohup cagent run "$AGENT_FILE" \
+        --agent docktor \
+        > "$LOG_FILE" 2>&1 &
+    else
+      echo "Starting AI agent in AUTONOMOUS mode (auto-approves all actions)..."
+      echo "The agent will run continuously in the background."
+      echo
+
+      # Launch cagent in autonomous mode with:
+      # --tui=false: Disable Terminal UI (headless mode)
+      # --yolo: Auto-approve all tool calls (autonomous mode)
+      # Continuous loop: Send prompt every 10 seconds to keep agent running
+      # Keep prompts short to avoid context overflow
+      (
+        while true; do
+          echo "Check and scale"
+          sleep 10
+        done
+      ) | nohup cagent run "$AGENT_FILE" \
+        --agent docktor \
+        --tui=false \
+        --yolo \
+        > "$LOG_FILE" 2>&1 &
+    fi
 
     DAEMON_PID=$!
     echo $DAEMON_PID > "$PID_FILE"
@@ -195,23 +168,32 @@ case "${1:-start}" in
 
   *)
     cat <<EOF
-Usage: $0 {start|stop|restart|status|logs}
+Usage: $0 {start|stop|restart|status|logs} [--manual]
 
 Commands:
-  start    Start the autonomous AI autoscaling daemon
+  start    Start the AI autoscaling daemon
   stop     Stop the daemon
   restart  Restart the daemon
   status   Show daemon status and recent activity
   logs     Follow daemon logs in real-time
 
+Flags:
+  --manual  Run in manual mode (requires user approval for each action)
+            Default: autonomous mode (auto-approves all actions)
+
 Environment:
   DOCKTOR_LOG_FILE  Path to log file (default: /tmp/docktor-daemon.log)
 
-Example:
-  $0 start              # Start daemon
-  $0 logs               # Watch logs
-  bash scripts/load-cpu.sh  # Generate load
-  $0 stop               # Stop daemon
+Examples:
+  $0 start                    # Start in autonomous mode (default)
+  $0 start --manual           # Start in manual mode
+  $0 logs                     # Watch logs
+  bash scripts/load-cpu.sh    # Generate load
+  $0 stop                     # Stop daemon
+
+Modes:
+  Autonomous (default): Agent monitors and scales automatically every 10s
+  Manual (--manual):    Agent waits for user approval before each action
 EOF
     exit 1
     ;;

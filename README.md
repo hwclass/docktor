@@ -41,23 +41,25 @@ bash scripts/watch.sh
 For truly autonomous 24/7 operation without TUI:
 
 ```bash
-# 1. Start the Docker stack manually
-docker compose -f examples/docker-compose.yaml up -d --scale web=2
-
-# 2. Start the AI autoscaling daemon (runs in background)
+# Autonomous mode (default - auto-approves all actions)
 bash scripts/daemon.sh start
 
-# 3. Monitor in real-time
-tail -f /tmp/docktor-daemon.log | grep -E "Calling|response"
+# Manual mode (requires user approval for each action)
+bash scripts/daemon.sh start --manual
 
-# 4. Check status
+# Monitor in real-time
+tail -f /tmp/docktor-daemon.log
+
+# Check status
 bash scripts/daemon.sh status
 
-# 5. Stop daemon
+# Stop daemon
 bash scripts/daemon.sh stop
 ```
 
-**Note**: This daemon mode runs continuously in the background and scales automatically without user interaction.
+**Modes:**
+- **Autonomous (default)**: Monitors every 10s and scales automatically without user approval
+- **Manual (`--manual`)**: Waits for user approval before each scaling action
 
 📖 **Full testing guide**: See [AUTOSCALE_GUIDE.md](AUTOSCALE_GUIDE.md)
 
@@ -412,10 +414,10 @@ echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"detect_ano
 - [ ] **AWS Bedrock** - Requires cagent support for Bedrock API format
 
 ### Core Features
-- [ ] **Persistent Daemon**: True continuous autonomous operation without TUI
-  - Currently: Agent requires user interaction via TUI to trigger each scaling cycle
-  - Goal: Background daemon that monitors and scales automatically 24/7
-  - Workaround: Use `scripts/daemon.sh` for persistent operation
+- [x] **Autonomous Daemon**: True continuous operation without user interaction
+  - `bash scripts/daemon.sh start` - Runs autonomously (default, auto-approves actions)
+  - `bash scripts/daemon.sh start --manual` - Runs with user approval required
+  - Monitors every 10 seconds and scales automatically based on CPU thresholds
 - [ ] **Multi-Service Scaling**: Scale multiple services simultaneously
 - [ ] **Memory/Network Metrics**: Beyond just CPU%
 - [ ] **Selectable LLM Models**: Let users choose which model to use

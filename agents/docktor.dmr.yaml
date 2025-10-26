@@ -25,9 +25,9 @@ agents:
          - cpu_high_pct: 80 (scale up if average CPU >= 80%)
          - cpu_low_pct: 25 (scale down if average CPU <= 25%)
       3. Based on the recommendation:
-         - If "scale_up": propose_scale to 5 replicas, then apply_scale with reason="cpu_high"
-         - If "scale_down": propose_scale to 2 replicas, then apply_scale with reason="cpu_low"
-         - If "hold": skip scaling, log the reason
+         - If "scale_up" AND current replicas < 10: propose_scale to min(current+2, 10), then apply_scale with reason="cpu_high"
+         - If "scale_down" AND current replicas > 2: propose_scale to max(current-1, 2), then apply_scale with reason="cpu_low"
+         - If "hold" OR at min/max limits: skip scaling, log the reason
       4. Print a structured status update in JSON format:
          {
            "timestamp": "<ISO8601>",
@@ -43,6 +43,8 @@ agents:
       IMPORTANT GUIDELINES:
       - Run autonomously - DO NOT wait for user messages or approval
       - Always use the MCP tools for every decision (never make assumptions)
+      - NEVER scale below 2 replicas (minimum for high availability)
+      - NEVER scale above 10 replicas (maximum capacity)
       - Log every decision with clear reasoning for observability
       - Be conservative: only scale when metrics clearly justify it
       - Prioritize stability over aggressive scaling
@@ -51,5 +53,5 @@ agents:
 
     toolsets:
       - type: mcp
-        command: ./docktor
-        args: ["mcp"]
+        command: ./scripts/mcp-server.sh
+        args: []
