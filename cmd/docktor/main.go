@@ -513,6 +513,18 @@ func mcpToolsList(id json.RawMessage) {
 			},
 		},
 		{
+			Name:        "get_current_replicas",
+			Description: "Get the current number of running replicas for a service from Docker Compose",
+			InputSchema: map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"service": map[string]interface{}{"type": "string"},
+				},
+				"required": []string{"service"},
+			},
+		},
+		{
 			Name:        "detect_anomalies",
 			Description: "Recommend scale_up/scale_down based on CPU thresholds",
 			InputSchema: map[string]interface{}{
@@ -595,6 +607,25 @@ func mcpToolsCall(id json.RawMessage, params json.RawMessage) {
 		writeRes(id, map[string]interface{}{
 			"content": []map[string]interface{}{
 				{"type": "text", "text": toJSON(map[string]interface{}{"metrics": res})},
+			},
+			"isError": false,
+		})
+	case "get_current_replicas":
+		var in struct {
+			Service string `json:"service"`
+		}
+		_ = json.Unmarshal(p.Arguments, &in)
+		log.Printf("[MCP] get_current_replicas(service=%s)", in.Service)
+		count, err := toolGetCurrentReplicas(in.Service)
+		if err != nil {
+			log.Printf("[MCP] get_current_replicas ERROR: %v", err)
+			writeErr(id, 1, err.Error())
+			return
+		}
+		log.Printf("[MCP] get_current_replicas RESULT: %d", count)
+		writeRes(id, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": toJSON(map[string]interface{}{"current_replicas": count})},
 			},
 			"isError": false,
 		})
@@ -711,6 +742,31 @@ func toolGetMetrics(containerRegex string, windowSec int) (map[string]float64, e
 		}
 	}
 	return avg, nil
+}
+
+func toolGetCurrentReplicas(service string) (int, error) {
+	composeFile := os.Getenv("DOCKTOR_COMPOSE_FILE")
+	if composeFile == "" {
+		return 0, fmt.Errorf("DOCKTOR_COMPOSE_FILE not set")
+	}
+
+	// Use docker compose ps to count running containers for the service
+	out, err := exec.Command("docker", "compose", "-f", composeFile, "ps", service, "--format", "{{.Name}}").CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("docker compose ps: %w", err)
+	}
+
+	// Count non-empty lines
+	count := 0
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			count++
+		}
+	}
+
+	return count, nil
 }
 
 func toolDetect(metrics map[string]float64, hi, lo float64) (string, string) {

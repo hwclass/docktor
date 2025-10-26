@@ -13,31 +13,32 @@ agents:
       1. Call get_metrics(container_regex="$DOCKTOR_SERVICE", window_sec=$DOCKTOR_METRICS_WINDOW)
          to collect current CPU metrics
 
-      2. Count current replicas by counting the number of containers in the metrics response
-         Example: if metrics = {"web-1": 45.2, "web-2": 50.3}, then current_replicas = 2
+      2. Call get_current_replicas(service="$DOCKTOR_SERVICE")
+         to get the accurate current replica count from Docker Compose
+         This returns the actual number of running containers, avoiding race conditions
 
       3. Call detect_anomalies with the metrics from step 1:
          detect_anomalies(metrics=<exact_metrics_object>, rules={cpu_high_pct: $DOCKTOR_CPU_HIGH, cpu_low_pct: $DOCKTOR_CPU_LOW})
          IMPORTANT: Pass the EXACT metrics object as-is, keep all numbers as numbers
 
-      4. Act on the recommendation based on current_replicas from step 2:
+      4. Act on the recommendation using current_replicas from step 2:
 
          - If recommendation is "scale_up":
            * Check if current_replicas < $DOCKTOR_MAX_REPLICAS
            * If yes:
-             - Add $DOCKTOR_SCALE_UP_BY to current_replicas
-             - Cap at $DOCKTOR_MAX_REPLICAS (use the smaller value)
-             - Call propose_scale(service="$DOCKTOR_SERVICE", target_replicas=<calculated_target>)
-             - Call apply_scale(service="$DOCKTOR_SERVICE", target_replicas=<calculated_target>, reason="cpu_high")
+             - Calculate target = current_replicas + $DOCKTOR_SCALE_UP_BY
+             - If target > $DOCKTOR_MAX_REPLICAS, set target = $DOCKTOR_MAX_REPLICAS
+             - Call propose_scale(service="$DOCKTOR_SERVICE", target_replicas=target)
+             - Call apply_scale(service="$DOCKTOR_SERVICE", target_replicas=target, reason="cpu_high")
            * If already at max: Log "Already at maximum replicas"
 
          - If recommendation is "scale_down":
            * Check if current_replicas > $DOCKTOR_MIN_REPLICAS
            * If yes:
-             - Subtract $DOCKTOR_SCALE_DOWN_BY from current_replicas
-             - Floor at $DOCKTOR_MIN_REPLICAS (use the larger value)
-             - Call propose_scale(service="$DOCKTOR_SERVICE", target_replicas=<calculated_target>)
-             - Call apply_scale(service="$DOCKTOR_SERVICE", target_replicas=<calculated_target>, reason="cpu_low")
+             - Calculate target = current_replicas - $DOCKTOR_SCALE_DOWN_BY
+             - If target < $DOCKTOR_MIN_REPLICAS, set target = $DOCKTOR_MIN_REPLICAS
+             - Call propose_scale(service="$DOCKTOR_SERVICE", target_replicas=target)
+             - Call apply_scale(service="$DOCKTOR_SERVICE", target_replicas=target, reason="cpu_low")
            * If already at min: Log "Already at minimum replicas"
 
          - If recommendation is "hold":
