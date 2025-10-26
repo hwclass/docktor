@@ -68,6 +68,7 @@ Commands:
             --manual: Require approval for each action
             --compose-file: Path to compose file (overrides config)
             --service: Service name to monitor (overrides config)
+            --interval: Check interval in seconds (overrides config, e.g., 30)
     stop    Stop running daemon
     status  Check daemon status
     logs    Follow daemon logs
@@ -85,8 +86,11 @@ Examples:
   # Start manual daemon (requires user approval)
   docktor daemon start --manual
 
-  # Monitor custom compose file and service
-  docktor daemon start --compose-file ./docker-compose.prod.yaml --service api
+  # Check every 30 seconds instead of default 10
+  docktor daemon start --interval 30
+
+  # Monitor custom compose file and service with custom interval
+  docktor daemon start --compose-file ./prod.yaml --service api --interval 60
 
   # Check daemon status and logs
   docktor daemon status
@@ -105,10 +109,11 @@ type opts struct {
 }
 
 type daemonOpts struct {
-	manual      bool
-	composeFile string
-	service     string
-	configFile  string
+	manual        bool
+	composeFile   string
+	service       string
+	configFile    string
+	checkInterval int
 }
 
 // Config represents docktor.yaml configuration
@@ -227,6 +232,13 @@ func parseDaemonFlags(args []string) daemonOpts {
 		case "--service":
 			if idx+1 < len(args) {
 				opts.service = args[idx+1]
+				idx++
+			}
+		case "--interval":
+			if idx+1 < len(args) {
+				if interval, err := strconv.Atoi(args[idx+1]); err == nil && interval > 0 {
+					opts.checkInterval = interval
+				}
 				idx++
 			}
 		}
@@ -823,6 +835,9 @@ func daemonStart(args []string, pidFile, logFile string) {
 	}
 	if opts.service != "web" {
 		cfg.Service = opts.service
+	}
+	if opts.checkInterval > 0 {
+		cfg.Scaling.CheckInterval = opts.checkInterval
 	}
 
 	// Resolve compose file path (support both relative and absolute paths)
