@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -62,9 +64,10 @@ Usage:
 Commands:
   daemon    Autonomous autoscaling daemon
     start   Start daemon (autonomous by default)
+            --config: Path to docktor.yaml config file
             --manual: Require approval for each action
-            --compose-file: Path to compose file (default: examples/docker-compose.yaml)
-            --service: Service name to monitor (default: web)
+            --compose-file: Path to compose file (overrides config)
+            --service: Service name to monitor (overrides config)
     stop    Stop running daemon
     status  Check daemon status
     logs    Follow daemon logs
@@ -105,6 +108,77 @@ type daemonOpts struct {
 	manual      bool
 	composeFile string
 	service     string
+	configFile  string
+}
+
+// Config represents docktor.yaml configuration
+type Config struct {
+	Version     string       `yaml:"version"`
+	Service     string       `yaml:"service"`
+	ComposeFile string       `yaml:"compose_file"`
+	Scaling     ScalingConfig `yaml:"scaling"`
+}
+
+// ScalingConfig holds scaling thresholds and parameters
+type ScalingConfig struct {
+	CPUHigh       float64 `yaml:"cpu_high"`
+	CPULow        float64 `yaml:"cpu_low"`
+	MinReplicas   int     `yaml:"min_replicas"`
+	MaxReplicas   int     `yaml:"max_replicas"`
+	ScaleUpBy     int     `yaml:"scale_up_by"`
+	ScaleDownBy   int     `yaml:"scale_down_by"`
+	CheckInterval int     `yaml:"check_interval"`
+	MetricsWindow int     `yaml:"metrics_window"`
+}
+
+// DefaultConfig returns config with sensible defaults
+func DefaultConfig() Config {
+	return Config{
+		Version:     "1",
+		Service:     "web",
+		ComposeFile: "examples/docker-compose.yaml",
+		Scaling: ScalingConfig{
+			CPUHigh:       75.0,
+			CPULow:        20.0,
+			MinReplicas:   2,
+			MaxReplicas:   10,
+			ScaleUpBy:     2,
+			ScaleDownBy:   1,
+			CheckInterval: 10,
+			MetricsWindow: 10,
+		},
+	}
+}
+
+// LoadConfig loads configuration from YAML file
+func LoadConfig(path string) (Config, error) {
+	cfg := DefaultConfig()
+
+	if path == "" {
+		return cfg, nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, fmt.Errorf("failed to read config: %w", err)
+	}
+
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	// Validate
+	if cfg.Scaling.MinReplicas < 1 {
+		return cfg, fmt.Errorf("min_replicas must be >= 1")
+	}
+	if cfg.Scaling.MaxReplicas < cfg.Scaling.MinReplicas {
+		return cfg, fmt.Errorf("max_replicas must be >= min_replicas")
+	}
+	if cfg.Scaling.CPUHigh <= cfg.Scaling.CPULow {
+		return cfg, fmt.Errorf("cpu_high must be > cpu_low")
+	}
+
+	return cfg, nil
 }
 
 func parseFlags(args []string) opts {
@@ -140,6 +214,11 @@ func parseDaemonFlags(args []string) daemonOpts {
 		switch arg {
 		case "--manual":
 			opts.manual = true
+		case "--config":
+			if idx+1 < len(args) {
+				opts.configFile = args[idx+1]
+				idx++
+			}
 		case "--compose-file":
 			if idx+1 < len(args) {
 				opts.composeFile = args[idx+1]
@@ -676,8 +755,23 @@ func daemonStart(args []string, pidFile, logFile string) {
 	repoRoot, err := os.Getwd()
 	must(err)
 
+	// Load configuration
+	cfg, err := LoadConfig(opts.configFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Command-line flags override config
+	if opts.composeFile != "examples/docker-compose.yaml" {
+		cfg.ComposeFile = opts.composeFile
+	}
+	if opts.service != "web" {
+		cfg.Service = opts.service
+	}
+
 	// Resolve compose file path (support both relative and absolute paths)
-	composeFile := opts.composeFile
+	composeFile := cfg.ComposeFile
 	if !filepath.IsAbs(composeFile) {
 		composeFile = filepath.Join(repoRoot, composeFile)
 	}
@@ -699,9 +793,9 @@ func daemonStart(args []string, pidFile, logFile string) {
 		os.Exit(1)
 	}
 
-	// Start compose stack
+	// Start compose stack with configured min_replicas
 	fmt.Printf("Starting Docker Compose stack (%s)...\n", composeFile)
-	must(run("docker", "compose", "-f", composeFile, "up", "-d", "--scale", fmt.Sprintf("%s=2", opts.service)))
+	must(run("docker", "compose", "-f", composeFile, "up", "-d", "--scale", fmt.Sprintf("%s=%d", cfg.Service, cfg.Scaling.MinReplicas)))
 
 	// Detect LLM backend
 	useDMR := probeURL(modelRunnerEngineURL) || probeURL(modelRunnerV1URL)
@@ -731,9 +825,16 @@ func daemonStart(args []string, pidFile, logFile string) {
 	fmt.Println("\n=== Starting Docktor Daemon ===")
 	fmt.Printf("Mode: %s\n", map[bool]string{true: "MANUAL", false: "AUTONOMOUS"}[opts.manual])
 	fmt.Printf("Compose: %s\n", composeFile)
-	fmt.Printf("Service: %s\n", opts.service)
+	fmt.Printf("Service: %s\n", cfg.Service)
 	fmt.Printf("Agent: %s\n", filepath.Base(agentFile))
-	fmt.Printf("Log: %s\n\n", logFile)
+	if opts.configFile != "" {
+		fmt.Printf("Config: %s\n", opts.configFile)
+	}
+	fmt.Printf("Log: %s\n", logFile)
+	fmt.Printf("\nScaling Config:\n")
+	fmt.Printf("  CPU Thresholds: %.0f%% (high) / %.0f%% (low)\n", cfg.Scaling.CPUHigh, cfg.Scaling.CPULow)
+	fmt.Printf("  Replicas: %d (min) / %d (max)\n", cfg.Scaling.MinReplicas, cfg.Scaling.MaxReplicas)
+	fmt.Printf("  Check Interval: %ds\n\n", cfg.Scaling.CheckInterval)
 
 	// Prepare cagent command
 	cagentArgs := []string{"run", agentFile, "--agent", "docktor", "--env-from-file", envFile}
@@ -746,7 +847,17 @@ func daemonStart(args []string, pidFile, logFile string) {
 	must(err)
 
 	cmd := exec.Command("cagent", cagentArgs...)
-	cmd.Env = append(os.Environ(), "DOCKTOR_COMPOSE_FILE="+composeFile)
+	cmd.Env = append(os.Environ(),
+		"DOCKTOR_COMPOSE_FILE="+composeFile,
+		fmt.Sprintf("DOCKTOR_SERVICE=%s", cfg.Service),
+		fmt.Sprintf("DOCKTOR_CPU_HIGH=%.0f", cfg.Scaling.CPUHigh),
+		fmt.Sprintf("DOCKTOR_CPU_LOW=%.0f", cfg.Scaling.CPULow),
+		fmt.Sprintf("DOCKTOR_MIN_REPLICAS=%d", cfg.Scaling.MinReplicas),
+		fmt.Sprintf("DOCKTOR_MAX_REPLICAS=%d", cfg.Scaling.MaxReplicas),
+		fmt.Sprintf("DOCKTOR_SCALE_UP_BY=%d", cfg.Scaling.ScaleUpBy),
+		fmt.Sprintf("DOCKTOR_SCALE_DOWN_BY=%d", cfg.Scaling.ScaleDownBy),
+		fmt.Sprintf("DOCKTOR_METRICS_WINDOW=%d", cfg.Scaling.MetricsWindow),
+	)
 	cmd.Stdout = logFh
 	cmd.Stderr = logFh
 
@@ -754,11 +865,12 @@ func daemonStart(args []string, pidFile, logFile string) {
 		// Autonomous mode: pipe continuous prompts
 		stdinPipe, err := cmd.StdinPipe()
 		must(err)
+		checkInterval := time.Duration(cfg.Scaling.CheckInterval) * time.Second
 		go func() {
 			defer stdinPipe.Close()
 			for {
 				fmt.Fprintln(stdinPipe, "Check and scale")
-				time.Sleep(10 * time.Second)
+				time.Sleep(checkInterval)
 			}
 		}()
 	} else {

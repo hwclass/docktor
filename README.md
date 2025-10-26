@@ -78,6 +78,65 @@ bash examples/watch.sh
 
 ---
 
+## ⚙️ Configuration
+
+Docktor uses `docktor.yaml` for per-app scaling configuration. This allows customizing thresholds without code changes.
+
+### Example Configuration
+
+```yaml
+# docktor.yaml
+version: "1"
+
+service: web
+compose_file: docker-compose.yaml
+
+scaling:
+  cpu_high: 75.0        # Scale up when CPU >= 75%
+  cpu_low: 20.0         # Scale down when CPU <= 20%
+
+  min_replicas: 2       # Never scale below 2 (HA)
+  max_replicas: 10      # Never scale above 10 (capacity)
+
+  scale_up_by: 2        # Add 2 replicas when scaling up
+  scale_down_by: 1      # Remove 1 replica when scaling down
+
+  check_interval: 10    # Check every 10 seconds
+  metrics_window: 10    # Average metrics over 10 seconds
+```
+
+### Using Configuration
+
+```bash
+# Use default docktor.yaml
+./docktor daemon start
+
+# Use custom config
+./docktor daemon start --config my-app.yaml
+
+# Override specific values
+./docktor daemon start --config prod.yaml --service api
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `service` | string | `web` | Docker Compose service name to monitor |
+| `compose_file` | string | `examples/docker-compose.yaml` | Path to compose file |
+| `scaling.cpu_high` | float | `75.0` | CPU % threshold to trigger scale-up |
+| `scaling.cpu_low` | float | `20.0` | CPU % threshold to trigger scale-down |
+| `scaling.min_replicas` | int | `2` | Minimum replicas (high availability) |
+| `scaling.max_replicas` | int | `10` | Maximum replicas (cost/capacity limit) |
+| `scaling.scale_up_by` | int | `2` | Replicas to add when scaling up |
+| `scaling.scale_down_by` | int | `1` | Replicas to remove when scaling down |
+| `scaling.check_interval` | int | `10` | Seconds between autoscaling checks |
+| `scaling.metrics_window` | int | `10` | Seconds to collect and average metrics |
+
+📚 **See [AGENTS.md](AGENTS.md)** for agent instruction details and the [agents.md](https://agents.md/) specification.
+
+---
+
 ## What is Docktor?
 
 Docktor is an **AI-powered autoscaling system** that uses **local LLMs** to make intelligent scaling decisions for Docker Compose services.
