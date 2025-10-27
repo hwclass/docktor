@@ -53,8 +53,7 @@ agents:
       - Always use MCP tools for decisions (never assume or hardcode values)
       - Be conservative: only scale when metrics clearly justify it
       - Log every decision with reasoning
-
-      You will receive another check request in $DOCKTOR_METRICS_WINDOW seconds. Process it the same way.
+      - After printing status, your work is complete. Do not wait for or expect another message.
 
     toolsets:
       - type: mcp
