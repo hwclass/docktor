@@ -1,0 +1,21 @@
+# Example Docktor Configuration
+# This demonstrates aggressive scaling for demo purposes
+
+version: "1"
+
+service: web
+compose_file: docker-compose.yaml
+
+scaling:
+  # More aggressive thresholds for demo
+  cpu_high: 70.0       # Scale up earlier
+  cpu_low: 10.0        # Be more conservative about scaling down
+
+  min_replicas: 2      # Always keep 2 for HA
+  max_replicas: 7     # Don't need more
+
+  scale_up_by: 2       # Scale up faster
+  scale_down_by: 1     # Scale down conservatively
+
+  check_interval: 5    # Check every 10 seconds
+  metrics_window: 5    # Quick response to load changes

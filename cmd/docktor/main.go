@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -56,22 +58,43 @@ func printBanner() {
 func usage() {
 	fmt.Println(`docktor CLI
 Usage:
+  docktor daemon <start|stop|status|logs> [options]
   docktor ai up [--debug] [--no-install] [--skip-compose] [--headless]
 
 Commands:
-  ai up     Launch AI autoscaling agent
+  daemon    Autonomous autoscaling daemon
+    start   Start daemon (autonomous by default)
+            --config: Path to docktor.yaml config file
+            --manual: Require approval for each action
+            --compose-file: Path to compose file (overrides config)
+            --service: Service name to monitor (overrides config)
+            --interval: Check interval in seconds (overrides config, e.g., 30)
+    stop    Stop running daemon
+    status  Check daemon status
+    logs    Follow daemon logs
+
+  ai up     Launch AI autoscaling agent (legacy interactive mode)
             --debug: Enable verbose logging
             --headless: Run autoscaling loop without TUI
             --no-install: Skip automatic cagent installation
             --skip-compose: Skip docker compose up/down (agent monitors existing containers)
 
 Examples:
-  # Full lifecycle: start containers + run agent + cleanup on exit
-  docktor ai up
+  # Start autonomous daemon (default - auto-approves all actions)
+  docktor daemon start
 
-  # Monitor existing containers (no lifecycle management)
-  docker compose -f examples/docker-compose.yaml up -d --scale web=2
-  docktor ai up --skip-compose
+  # Start manual daemon (requires user approval)
+  docktor daemon start --manual
+
+  # Check every 30 seconds instead of default 10
+  docktor daemon start --interval 30
+
+  # Monitor custom compose file and service with custom interval
+  docktor daemon start --compose-file ./prod.yaml --service api --interval 60
+
+  # Check daemon status and logs
+  docktor daemon status
+  docktor daemon logs
 
 Internal:
   docktor mcp
@@ -83,6 +106,99 @@ type opts struct {
 	noInstall   bool
 	skipCompose bool
 	headless    bool
+}
+
+type daemonOpts struct {
+	manual        bool
+	composeFile   string
+	service       string
+	configFile    string
+	checkInterval int
+}
+
+// Config represents docktor.yaml configuration
+type Config struct {
+	Version     string       `yaml:"version"`
+	Service     string       `yaml:"service"`
+	ComposeFile string       `yaml:"compose_file"`
+	Scaling     ScalingConfig `yaml:"scaling"`
+}
+
+// ScalingConfig holds scaling thresholds and parameters
+type ScalingConfig struct {
+	CPUHigh       float64 `yaml:"cpu_high"`
+	CPULow        float64 `yaml:"cpu_low"`
+	MinReplicas   int     `yaml:"min_replicas"`
+	MaxReplicas   int     `yaml:"max_replicas"`
+	ScaleUpBy     int     `yaml:"scale_up_by"`
+	ScaleDownBy   int     `yaml:"scale_down_by"`
+	CheckInterval int     `yaml:"check_interval"`
+	MetricsWindow int     `yaml:"metrics_window"`
+}
+
+// DefaultConfig returns config with sensible defaults
+func DefaultConfig() Config {
+	return Config{
+		Version:     "1",
+		Service:     "web",
+		ComposeFile: "examples/docker-compose.yaml",
+		Scaling: ScalingConfig{
+			CPUHigh:       75.0,
+			CPULow:        20.0,
+			MinReplicas:   2,
+			MaxReplicas:   10,
+			ScaleUpBy:     2,
+			ScaleDownBy:   1,
+			CheckInterval: 10,
+			MetricsWindow: 10,
+		},
+	}
+}
+
+// LoadConfig loads configuration from YAML file
+func LoadConfig(path string) (Config, error) {
+	cfg := DefaultConfig()
+
+	// Auto-discover config file if not specified
+	if path == "" {
+		// Check for docktor.yaml in current directory
+		if _, err := os.Stat("docktor.yaml"); err == nil {
+			path = "docktor.yaml"
+		} else if _, err := os.Stat("docktor.yml"); err == nil {
+			path = "docktor.yml"
+		} else {
+			// No config file found, use defaults
+			return cfg, nil
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cfg, fmt.Errorf("failed to read config: %w", err)
+	}
+
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return cfg, fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	// Resolve relative paths in config relative to config file location
+	configDir := filepath.Dir(path)
+	if !filepath.IsAbs(cfg.ComposeFile) {
+		cfg.ComposeFile = filepath.Join(configDir, cfg.ComposeFile)
+	}
+
+	// Validate
+	if cfg.Scaling.MinReplicas < 1 {
+		return cfg, fmt.Errorf("min_replicas must be >= 1")
+	}
+	if cfg.Scaling.MaxReplicas < cfg.Scaling.MinReplicas {
+		return cfg, fmt.Errorf("max_replicas must be >= min_replicas")
+	}
+	if cfg.Scaling.CPUHigh <= cfg.Scaling.CPULow {
+		return cfg, fmt.Errorf("cpu_high must be > cpu_low")
+	}
+
+	return cfg, nil
 }
 
 func parseFlags(args []string) opts {
@@ -102,12 +218,61 @@ func parseFlags(args []string) opts {
 	return o
 }
 
+func parseDaemonFlags(args []string) daemonOpts {
+	const (
+		defaultComposeFile = "examples/docker-compose.yaml"
+		defaultService     = "web"
+	)
+
+	opts := daemonOpts{
+		composeFile: defaultComposeFile,
+		service:     defaultService,
+	}
+
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+		switch arg {
+		case "--manual":
+			opts.manual = true
+		case "--config":
+			if idx+1 < len(args) {
+				opts.configFile = args[idx+1]
+				idx++
+			}
+		case "--compose-file":
+			if idx+1 < len(args) {
+				opts.composeFile = args[idx+1]
+				idx++
+			}
+		case "--service":
+			if idx+1 < len(args) {
+				opts.service = args[idx+1]
+				idx++
+			}
+		case "--interval":
+			if idx+1 < len(args) {
+				if interval, err := strconv.Atoi(args[idx+1]); err == nil && interval > 0 {
+					opts.checkInterval = interval
+				}
+				idx++
+			}
+		}
+	}
+	return opts
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
 		return
 	}
 	switch os.Args[1] {
+	case "daemon":
+		if len(os.Args) < 3 {
+			usage()
+			return
+		}
+		runDaemon(os.Args[2], os.Args[3:])
 	case "ai":
 		if len(os.Args) < 3 || os.Args[2] != "up" {
 			usage()
@@ -118,6 +283,28 @@ func main() {
 		runMCP()
 	default:
 		usage()
+	}
+}
+
+func runDaemon(action string, args []string) {
+	const (
+		pidFile = "/tmp/docktor-daemon.pid"
+		logFile = "/tmp/docktor-daemon.log"
+	)
+
+	switch action {
+	case "start":
+		daemonStart(args, pidFile, logFile)
+	case "stop":
+		daemonStop(pidFile)
+	case "status":
+		daemonStatus(pidFile, logFile)
+	case "logs":
+		daemonLogs(logFile)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown daemon action: %s\n", action)
+		usage()
+		os.Exit(1)
 	}
 }
 
@@ -326,6 +513,31 @@ func mcpToolsList(id json.RawMessage) {
 			},
 		},
 		{
+			Name:        "get_current_replicas",
+			Description: "Get the current number of running replicas for a service from Docker Compose",
+			InputSchema: map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"service": map[string]interface{}{"type": "string"},
+				},
+				"required": []string{"service"},
+			},
+		},
+		{
+			Name:        "calculate_target_replicas",
+			Description: "Calculate target replicas based on scaling recommendation and current count. Handles all arithmetic logic per config.",
+			InputSchema: map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"recommendation":    map[string]interface{}{"type": "string", "enum": []string{"scale_up", "scale_down", "hold"}},
+					"current_replicas":  map[string]interface{}{"type": "integer"},
+				},
+				"required": []string{"recommendation", "current_replicas"},
+			},
+		},
+		{
 			Name:        "detect_anomalies",
 			Description: "Recommend scale_up/scale_down based on CPU thresholds",
 			InputSchema: map[string]interface{}{
@@ -408,6 +620,45 @@ func mcpToolsCall(id json.RawMessage, params json.RawMessage) {
 		writeRes(id, map[string]interface{}{
 			"content": []map[string]interface{}{
 				{"type": "text", "text": toJSON(map[string]interface{}{"metrics": res})},
+			},
+			"isError": false,
+		})
+	case "get_current_replicas":
+		var in struct {
+			Service string `json:"service"`
+		}
+		_ = json.Unmarshal(p.Arguments, &in)
+		log.Printf("[MCP] get_current_replicas(service=%s)", in.Service)
+		count, err := toolGetCurrentReplicas(in.Service)
+		if err != nil {
+			log.Printf("[MCP] get_current_replicas ERROR: %v", err)
+			writeErr(id, 1, err.Error())
+			return
+		}
+		log.Printf("[MCP] get_current_replicas RESULT: %d", count)
+		writeRes(id, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": toJSON(map[string]interface{}{"current_replicas": count})},
+			},
+			"isError": false,
+		})
+	case "calculate_target_replicas":
+		var in struct {
+			Recommendation   string `json:"recommendation"`
+			CurrentReplicas  int    `json:"current_replicas"`
+		}
+		_ = json.Unmarshal(p.Arguments, &in)
+		log.Printf("[MCP] calculate_target_replicas(recommendation=%s, current_replicas=%d)", in.Recommendation, in.CurrentReplicas)
+		result, err := toolCalculateTargetReplicas(in.Recommendation, in.CurrentReplicas)
+		if err != nil {
+			log.Printf("[MCP] calculate_target_replicas ERROR: %v", err)
+			writeErr(id, 1, err.Error())
+			return
+		}
+		log.Printf("[MCP] calculate_target_replicas RESULT: %v", result)
+		writeRes(id, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": toJSON(result)},
 			},
 			"isError": false,
 		})
@@ -526,6 +777,85 @@ func toolGetMetrics(containerRegex string, windowSec int) (map[string]float64, e
 	return avg, nil
 }
 
+func toolGetCurrentReplicas(service string) (int, error) {
+	composeFile := os.Getenv("DOCKTOR_COMPOSE_FILE")
+	if composeFile == "" {
+		return 0, fmt.Errorf("DOCKTOR_COMPOSE_FILE not set")
+	}
+
+	// Use docker compose ps to count running containers for the service
+	out, err := exec.Command("docker", "compose", "-f", composeFile, "ps", service, "--format", "{{.Name}}").CombinedOutput()
+	if err != nil {
+		return 0, fmt.Errorf("docker compose ps: %w", err)
+	}
+
+	// Count non-empty lines
+	count := 0
+	scanner := bufio.NewScanner(strings.NewReader(string(out)))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			count++
+		}
+	}
+
+	return count, nil
+}
+
+func toolCalculateTargetReplicas(recommendation string, currentReplicas int) (map[string]interface{}, error) {
+	// Get config values from environment
+	minReplicas, _ := strconv.Atoi(os.Getenv("DOCKTOR_MIN_REPLICAS"))
+	maxReplicas, _ := strconv.Atoi(os.Getenv("DOCKTOR_MAX_REPLICAS"))
+	scaleUpBy, _ := strconv.Atoi(os.Getenv("DOCKTOR_SCALE_UP_BY"))
+	scaleDownBy, _ := strconv.Atoi(os.Getenv("DOCKTOR_SCALE_DOWN_BY"))
+
+	var targetReplicas int
+	var action string
+	var shouldScale bool
+
+	switch recommendation {
+	case "scale_up":
+		if currentReplicas >= maxReplicas {
+			action = "hold"
+			shouldScale = false
+			targetReplicas = currentReplicas
+		} else {
+			targetReplicas = currentReplicas + scaleUpBy
+			if targetReplicas > maxReplicas {
+				targetReplicas = maxReplicas
+			}
+			action = "scale_up"
+			shouldScale = true
+		}
+	case "scale_down":
+		if currentReplicas <= minReplicas {
+			action = "hold"
+			shouldScale = false
+			targetReplicas = currentReplicas
+		} else {
+			targetReplicas = currentReplicas - scaleDownBy
+			if targetReplicas < minReplicas {
+				targetReplicas = minReplicas
+			}
+			action = "scale_down"
+			shouldScale = true
+		}
+	case "hold":
+		action = "hold"
+		shouldScale = false
+		targetReplicas = currentReplicas
+	default:
+		return nil, fmt.Errorf("unknown recommendation: %s", recommendation)
+	}
+
+	return map[string]interface{}{
+		"action":          action,
+		"should_scale":    shouldScale,
+		"target_replicas": targetReplicas,
+		"current_replicas": currentReplicas,
+	}, nil
+}
+
 func toolDetect(metrics map[string]float64, hi, lo float64) (string, string) {
 	if len(metrics) == 0 {
 		return "hold", "no metrics"
@@ -578,6 +908,351 @@ func runMCP() {
 			}
 		}
 	}
+}
+
+// generateAgentConfig creates a runtime agent config with substituted config values
+func generateAgentConfig(sourceFile, targetFile string, cfg Config) error {
+	// Read source agent file
+	data, err := os.ReadFile(sourceFile)
+	if err != nil {
+		return fmt.Errorf("failed to read agent file: %w", err)
+	}
+
+	// Parse YAML
+	var agentYAML map[string]interface{}
+	if err := yaml.Unmarshal(data, &agentYAML); err != nil {
+		return fmt.Errorf("failed to parse agent YAML: %w", err)
+	}
+
+	// Navigate to docktor agent instruction
+	agents, ok := agentYAML["agents"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("invalid agent file: missing agents section")
+	}
+
+	docktor, ok := agents["docktor"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("invalid agent file: missing docktor agent")
+	}
+
+	instruction, ok := docktor["instruction"].(string)
+	if !ok {
+		return fmt.Errorf("invalid agent file: missing instruction")
+	}
+
+	// Substitute config values into instruction
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_SERVICE", cfg.Service)
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_METRICS_WINDOW", fmt.Sprintf("%d", cfg.Scaling.MetricsWindow))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_CPU_HIGH", fmt.Sprintf("%.0f", cfg.Scaling.CPUHigh))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_CPU_LOW", fmt.Sprintf("%.0f", cfg.Scaling.CPULow))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_MIN_REPLICAS", fmt.Sprintf("%d", cfg.Scaling.MinReplicas))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_MAX_REPLICAS", fmt.Sprintf("%d", cfg.Scaling.MaxReplicas))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_SCALE_UP_BY", fmt.Sprintf("%d", cfg.Scaling.ScaleUpBy))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_SCALE_DOWN_BY", fmt.Sprintf("%d", cfg.Scaling.ScaleDownBy))
+
+	docktor["instruction"] = instruction
+
+	// Write modified config
+	output, err := yaml.Marshal(agentYAML)
+	if err != nil {
+		return fmt.Errorf("failed to marshal YAML: %w", err)
+	}
+
+	if err := os.WriteFile(targetFile, output, 0644); err != nil {
+		return fmt.Errorf("failed to write file: %w", err)
+	}
+
+	return nil
+}
+
+func daemonStart(args []string, pidFile, logFile string) {
+	opts := parseDaemonFlags(args)
+
+	// Check if daemon is already running
+	if pidData, err := os.ReadFile(pidFile); err == nil {
+		pid := strings.TrimSpace(string(pidData))
+		if checkProcess(pid) {
+			fmt.Fprintf(os.Stderr, "Daemon already running (PID %s)\n", pid)
+			os.Exit(1)
+		}
+	}
+
+	repoRoot, err := os.Getwd()
+	must(err)
+
+	// Load configuration
+	cfg, err := LoadConfig(opts.configFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Track which config was loaded for logging
+	configSource := "built-in defaults"
+	if opts.configFile != "" {
+		configSource = opts.configFile
+	} else if _, err := os.Stat("docktor.yaml"); err == nil {
+		configSource = "docktor.yaml (auto-discovered)"
+	} else if _, err := os.Stat("docktor.yml"); err == nil {
+		configSource = "docktor.yml (auto-discovered)"
+	}
+
+	// Command-line flags override config
+	if opts.composeFile != "examples/docker-compose.yaml" {
+		cfg.ComposeFile = opts.composeFile
+	}
+	if opts.service != "web" {
+		cfg.Service = opts.service
+	}
+	if opts.checkInterval > 0 {
+		cfg.Scaling.CheckInterval = opts.checkInterval
+	}
+
+	// Resolve compose file path (support both relative and absolute paths)
+	composeFile := cfg.ComposeFile
+	if !filepath.IsAbs(composeFile) {
+		composeFile = filepath.Join(repoRoot, composeFile)
+	}
+
+	if !fileExists(composeFile) {
+		fmt.Fprintf(os.Stderr, "Error: Compose file not found: %s\n", composeFile)
+		os.Exit(1)
+	}
+
+	envFile := filepath.Join(repoRoot, ".env.cagent")
+	agentDMR := filepath.Join(repoRoot, "agents", "docktor.dmr.yaml")
+	agentCloud := filepath.Join(repoRoot, "agents", "docktor.cloud.yaml")
+
+	printBanner()
+
+	// Check for cagent
+	if !hasBinary("cagent") {
+		fmt.Fprintln(os.Stderr, "Error: cagent not found. Install with: brew install cagent")
+		os.Exit(1)
+	}
+
+	// Start compose stack with configured min_replicas
+	fmt.Printf("Starting Docker Compose stack (%s)...\n", composeFile)
+	must(run("docker", "compose", "-f", composeFile, "up", "-d", "--scale", fmt.Sprintf("%s=%d", cfg.Service, cfg.Scaling.MinReplicas)))
+
+	// Detect LLM backend
+	useDMR := probeURL(modelRunnerEngineURL) || probeURL(modelRunnerV1URL)
+	var agentFile string
+	if !fileExists(envFile) {
+		if useDMR {
+			content := fmt.Sprintf("OPENAI_BASE_URL=%s\nOPENAI_API_KEY=dummy\nOPENAI_MODEL=dmr/ai/llama3.2\n", modelRunnerBaseURL)
+			_ = os.WriteFile(envFile, []byte(content), 0644)
+			fmt.Println("▶ Using Docker Model Runner with Llama 3.2")
+		} else {
+			fmt.Fprintln(os.Stderr, "ERROR: No Docker Model Runner detected and no .env.cagent for Gateway/OpenAI.")
+			fmt.Fprintln(os.Stderr, "Create .env.cagent with:")
+			fmt.Fprintln(os.Stderr, "  OPENAI_BASE_URL=https://api.openai.com/v1 (or your gateway)")
+			fmt.Fprintln(os.Stderr, "  OPENAI_API_KEY=sk-...")
+			fmt.Fprintln(os.Stderr, "  OPENAI_MODEL=gpt-4")
+			_ = run("docker", "compose", "-f", composeFile, "down")
+			os.Exit(1)
+		}
+	}
+
+	if useDMR {
+		agentFile = agentDMR
+	} else {
+		agentFile = agentCloud
+	}
+
+	// Generate runtime agent config with substituted values
+	runtimeAgentFile := filepath.Join(repoRoot, ".docktor-agent-runtime.yaml")
+	if err := generateAgentConfig(agentFile, runtimeAgentFile, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error generating agent config: %v\n", err)
+		os.Exit(1)
+	}
+	agentFile = runtimeAgentFile
+
+	fmt.Println("\n=== Starting Docktor Daemon ===")
+	fmt.Printf("Mode: %s\n", map[bool]string{true: "MANUAL", false: "AUTONOMOUS"}[opts.manual])
+	fmt.Printf("Config: %s\n", configSource)
+	fmt.Printf("Compose: %s\n", composeFile)
+	fmt.Printf("Service: %s\n", cfg.Service)
+	fmt.Printf("Agent: %s\n", filepath.Base(agentFile))
+	fmt.Printf("Log: %s\n", logFile)
+	fmt.Printf("\nScaling Config:\n")
+	fmt.Printf("  CPU Thresholds: %.0f%% (high) / %.0f%% (low)\n", cfg.Scaling.CPUHigh, cfg.Scaling.CPULow)
+	fmt.Printf("  Replicas: %d (min) / %d (max)\n", cfg.Scaling.MinReplicas, cfg.Scaling.MaxReplicas)
+	fmt.Printf("  Scale by: +%d / -%d replicas\n", cfg.Scaling.ScaleUpBy, cfg.Scaling.ScaleDownBy)
+	fmt.Printf("  Check Interval: %ds\n\n", cfg.Scaling.CheckInterval)
+
+	// Prepare cagent command template
+	cagentArgs := []string{"run", agentFile, "--agent", "docktor", "--env-from-file", envFile}
+	if !opts.manual {
+		cagentArgs = append(cagentArgs, "--yolo", "--tui=false")
+	}
+
+	cagentEnv := append(os.Environ(),
+		"DOCKTOR_COMPOSE_FILE="+composeFile,
+		fmt.Sprintf("DOCKTOR_SERVICE=%s", cfg.Service),
+		fmt.Sprintf("DOCKTOR_CPU_HIGH=%.0f", cfg.Scaling.CPUHigh),
+		fmt.Sprintf("DOCKTOR_CPU_LOW=%.0f", cfg.Scaling.CPULow),
+		fmt.Sprintf("DOCKTOR_MIN_REPLICAS=%d", cfg.Scaling.MinReplicas),
+		fmt.Sprintf("DOCKTOR_MAX_REPLICAS=%d", cfg.Scaling.MaxReplicas),
+		fmt.Sprintf("DOCKTOR_SCALE_UP_BY=%d", cfg.Scaling.ScaleUpBy),
+		fmt.Sprintf("DOCKTOR_SCALE_DOWN_BY=%d", cfg.Scaling.ScaleDownBy),
+		fmt.Sprintf("DOCKTOR_METRICS_WINDOW=%d", cfg.Scaling.MetricsWindow),
+	)
+
+	// Create log file
+	logFh, err := os.Create(logFile)
+	must(err)
+
+	if opts.manual {
+		// Manual mode: single interactive session
+		cmd := exec.Command("cagent", cagentArgs...)
+		cmd.Env = cagentEnv
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = logFh
+		cmd.Stderr = logFh
+
+		must(cmd.Start())
+		must(os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0644))
+
+		fmt.Printf("✓ Daemon started successfully\n")
+		fmt.Printf("  PID: %d\n", cmd.Process.Pid)
+		fmt.Printf("  Logs: tail -f %s\n\n", logFile)
+
+		go func() {
+			cmd.Wait()
+			os.Remove(pidFile)
+		}()
+	} else {
+		// Autonomous mode: restart cagent fresh each interval
+		// This ensures the model processes each check as a new session
+		checkInterval := time.Duration(cfg.Scaling.CheckInterval) * time.Second
+		prompt := fmt.Sprintf(`Perform scaling check:
+1. get_metrics(container_regex="%s", window_sec=%d)
+2. detect_anomalies(metrics, rules={cpu_high_pct: %.0f, cpu_low_pct: %.0f})
+3. Act on recommendation (scale if needed, within min=%d max=%d)
+4. Print JSON status update`,
+			cfg.Service, cfg.Scaling.MetricsWindow,
+			cfg.Scaling.CPUHigh, cfg.Scaling.CPULow,
+			cfg.Scaling.MinReplicas, cfg.Scaling.MaxReplicas)
+
+		// Start supervisor loop in background
+		go func() {
+			iteration := 0
+			for {
+				iteration++
+				fmt.Fprintf(logFh, "\n=== Iteration %d ===\n", iteration)
+				logFh.Sync()
+
+				cmd := exec.Command("cagent", cagentArgs...)
+				cmd.Env = cagentEnv
+				cmd.Stdin = strings.NewReader(prompt)
+				cmd.Stdout = logFh
+				cmd.Stderr = logFh
+
+				cmd.Run() // Run and wait for completion
+
+				// Wait before next check
+				time.Sleep(checkInterval)
+			}
+		}()
+
+		// Write a placeholder PID (the supervisor goroutine's parent)
+		must(os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644))
+
+		fmt.Printf("✓ Daemon started successfully\n")
+		fmt.Printf("  PID: %d (supervisor)\n", os.Getpid())
+		fmt.Printf("  Logs: tail -f %s\n\n", logFile)
+		fmt.Printf("  Mode: Restarting cagent every %ds\n\n", cfg.Scaling.CheckInterval)
+
+		fmt.Printf("Control:\n")
+		fmt.Printf("  docktor daemon status  # Check status\n")
+		fmt.Printf("  docktor daemon logs    # Follow logs\n")
+		fmt.Printf("  docktor daemon stop    # Stop daemon\n")
+
+		// Block forever - the supervisor loop runs in background
+		select {}
+	}
+
+	fmt.Printf("Control:\n")
+	fmt.Printf("  docktor daemon status  # Check status\n")
+	fmt.Printf("  docktor daemon logs    # Follow logs\n")
+	fmt.Printf("  docktor daemon stop    # Stop daemon\n")
+}
+
+func daemonStop(pidFile string) {
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		fmt.Println("No daemon running (PID file not found)")
+		return
+	}
+
+	pid := strings.TrimSpace(string(pidData))
+	if !checkProcess(pid) {
+		fmt.Println("Daemon not running (stale PID file)")
+		os.Remove(pidFile)
+		return
+	}
+
+	fmt.Printf("Stopping daemon (PID %s)...\n", pid)
+	cmd := exec.Command("kill", pid)
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to stop daemon: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Wait for process to exit
+	for i := 0; i < 30; i++ {
+		if !checkProcess(pid) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	// Force kill if still running
+	if checkProcess(pid) {
+		fmt.Println("Daemon didn't stop gracefully, force killing...")
+		exec.Command("kill", "-9", pid).Run()
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	os.Remove(pidFile)
+	fmt.Println("✓ Daemon stopped")
+}
+
+func daemonStatus(pidFile, logFile string) {
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		fmt.Println("Status: NOT RUNNING")
+		return
+	}
+
+	pid := strings.TrimSpace(string(pidData))
+	if !checkProcess(pid) {
+		fmt.Println("Status: NOT RUNNING (stale PID file)")
+		return
+	}
+
+	fmt.Printf("Status: RUNNING\n")
+	fmt.Printf("  PID: %s\n", pid)
+	fmt.Printf("  Log: %s\n", logFile)
+	fmt.Println("\nRecent log entries:")
+	exec.Command("tail", "-20", logFile).Run()
+}
+
+func daemonLogs(logFile string) {
+	if !fileExists(logFile) {
+		fmt.Fprintf(os.Stderr, "Log file not found: %s\n", logFile)
+		os.Exit(1)
+	}
+	cmd := exec.Command("tail", "-f", logFile)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	must(cmd.Run())
+}
+
+func checkProcess(pid string) bool {
+	cmd := exec.Command("kill", "-0", pid)
+	return cmd.Run() == nil
 }
 
 func run(name string, args ...string) error {

@@ -17,49 +17,151 @@
 
 **Prerequisites**: Docker Desktop + Model Runner, cagent, Go 1.21+ (see [Installation](#installation))
 
+### Autonomous Daemon Mode (Recommended)
+
+For fully autonomous 24/7 operation - no user intervention required:
+
 ```bash
 # 1. Clone and build
 git clone https://github.com/hwclass/docktor
 cd docktor
 go build -o docktor ./cmd/docktor
 
-# 2. Run Docktor (opens cagent TUI)
-./docktor ai up
-
-# In the TUI, send a message to start autoscaling:
-# Type: "Start autoscaling web service now"
+# 2. Start autonomous daemon (auto-scales automatically)
+./docktor daemon start
 
 # 3. Generate load to trigger scaling (in another terminal)
-bash scripts/load-cpu.sh
+# Option A: Incremental load simulator (recommended for demos)
+bash examples/load-incremental.sh
 
-# 4. Watch containers scale automatically
-bash scripts/watch.sh
+# Option B: Quick test - instant high load (90 seconds)
+bash examples/load-quick.sh
+
+# 4. Monitor daemon in real-time
+./docktor daemon logs
+
+# 5. Check status
+./docktor daemon status
+
+# 6. Stop daemon when done
+./docktor daemon stop
 ```
 
-### Alternative: Background Daemon Mode (Persistent)
+**Advanced Options:**
+```bash
+# Custom compose file and service
+./docktor daemon start --compose-file ./production.yaml --service api
 
-For truly autonomous 24/7 operation without TUI:
+# Manual mode (requires approval for each action)
+./docktor daemon start --manual
+```
+
+### Interactive Mode (For Learning)
+
+For interactive exploration with chat interface - user intervention required:
 
 ```bash
-# 1. Start the Docker stack manually
-docker compose -f examples/docker-compose.yaml up -d --scale web=2
+# 1. Run Docktor (opens cagent TUI)
+./docktor ai up
 
-# 2. Start the AI autoscaling daemon (runs in background)
-bash scripts/daemon.sh start
+# 2. In the TUI, send a message to start autoscaling:
+# Type: "Start autoscaling web service now"
 
-# 3. Monitor in real-time
-tail -f /tmp/docktor-daemon.log | grep -E "Calling|response"
+# 3. Generate load (in another terminal)
+bash examples/load-cpu.sh
 
-# 4. Check status
-bash scripts/daemon.sh status
-
-# 5. Stop daemon
-bash scripts/daemon.sh stop
+# 4. Watch containers scale
+bash examples/watch.sh
 ```
 
-**Note**: This daemon mode runs continuously in the background and scales automatically without user interaction.
+**Mode Comparison:**
+- **Daemon (Recommended)**: Fully autonomous, runs in background, no user input needed
+- **Interactive**: Manual chat interface, good for learning how decisions are made
 
 📖 **Full testing guide**: See [AUTOSCALE_GUIDE.md](AUTOSCALE_GUIDE.md)
+
+---
+
+## ⚙️ Configuration
+
+Docktor uses `docktor.yaml` for per-app scaling configuration. This allows customizing thresholds without code changes.
+
+### Example Configuration
+
+```yaml
+# docktor.yaml
+version: "1"
+
+service: web
+compose_file: docker-compose.yaml
+
+scaling:
+  cpu_high: 75.0        # Scale up when CPU >= 75%
+  cpu_low: 20.0         # Scale down when CPU <= 20%
+
+  min_replicas: 2       # Never scale below 2 (HA)
+  max_replicas: 10      # Never scale above 10 (capacity)
+
+  scale_up_by: 2        # Add 2 replicas when scaling up
+  scale_down_by: 1      # Remove 1 replica when scaling down
+
+  check_interval: 10    # Check every 10 seconds
+  metrics_window: 10    # Average metrics over 10 seconds
+```
+
+### Using Configuration
+
+```bash
+# Use default docktor.yaml
+./docktor daemon start
+
+# Use custom config
+./docktor daemon start --config my-app.yaml
+
+# Override specific values
+./docktor daemon start --config prod.yaml --service api
+```
+
+### Configuration Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `service` | string | `web` | Docker Compose service name to monitor |
+| `compose_file` | string | `examples/docker-compose.yaml` | Path to compose file |
+| `scaling.cpu_high` | float | `75.0` | CPU % threshold to trigger scale-up |
+| `scaling.cpu_low` | float | `20.0` | CPU % threshold to trigger scale-down |
+| `scaling.min_replicas` | int | `2` | Minimum replicas (high availability) |
+| `scaling.max_replicas` | int | `10` | Maximum replicas (cost/capacity limit) |
+| `scaling.scale_up_by` | int | `2` | Replicas to add when scaling up |
+| `scaling.scale_down_by` | int | `1` | Replicas to remove when scaling down |
+| `scaling.check_interval` | int | `10` | Seconds between autoscaling checks |
+| `scaling.metrics_window` | int | `10` | Seconds to collect and average metrics |
+
+📚 **See [AGENTS.md](AGENTS.md)** for agent instruction details and the [agents.md](https://agents.md/) specification.
+
+### ⚠️ Known Limitations
+
+**Llama 3.2 (3B) Model Constraints:**
+
+When using Docker Model Runner with Llama 3.2 (3.21B parameters), you may experience:
+- Inconsistent constraint enforcement (may violate `min_replicas`)
+- Type conversion issues (numbers → strings in tool calls)
+- Incomplete autonomous loops (stops after initial iterations)
+
+**Recommended for Production:**
+```bash
+# Option 1: Use Cloud LLMs (more reliable)
+# Create .env.cagent:
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4  # or gpt-4-turbo, claude-3-opus
+
+# Option 2: Larger local models via Docker Model Runner
+# Use Llama 3.1 (70B) or Qwen 2.5 (32B) for better reliability
+```
+
+✅ **Llama 3.2 works for demos and testing**
+🚀 **Use GPT-4 or Claude for production workloads**
 
 ---
 
@@ -412,10 +514,10 @@ echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"detect_ano
 - [ ] **AWS Bedrock** - Requires cagent support for Bedrock API format
 
 ### Core Features
-- [ ] **Persistent Daemon**: True continuous autonomous operation without TUI
-  - Currently: Agent requires user interaction via TUI to trigger each scaling cycle
-  - Goal: Background daemon that monitors and scales automatically 24/7
-  - Workaround: Use `scripts/daemon.sh` for persistent operation
+- [x] **Autonomous Daemon**: True continuous operation without user interaction
+  - `bash scripts/daemon.sh start` - Runs autonomously (default, auto-approves actions)
+  - `bash scripts/daemon.sh start --manual` - Runs with user approval required
+  - Monitors every 10 seconds and scales automatically based on CPU thresholds
 - [ ] **Multi-Service Scaling**: Scale multiple services simultaneously
 - [ ] **Memory/Network Metrics**: Beyond just CPU%
 - [ ] **Selectable LLM Models**: Let users choose which model to use
