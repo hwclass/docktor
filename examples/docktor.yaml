@@ -17,5 +17,10 @@ scaling:
   scale_up_by: 2       # Scale up faster
   scale_down_by: 1     # Scale down conservatively
 
-  check_interval: 5    # Check every 10 seconds
+  check_interval: 5    # Check every 5 seconds
   metrics_window: 5    # Quick response to load changes
+
+llm:
+  provider: dmr        # "dmr" (Docker Model Runner) or "openai"
+  base_url: "http://localhost:12434/engines/llama.cpp/v1"
+  model: "ai/llama3.2" # e.g., ai/llama3.2, ai/smollm2, gpt-4o-mini

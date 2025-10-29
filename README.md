@@ -139,6 +139,105 @@ scaling:
 
 📚 **See [AGENTS.md](AGENTS.md)** for agent instruction details and the [agents.md](https://agents.md/) specification.
 
+---
+
+## 🤖 LLM Model Selection
+
+Docktor supports switching between different LLM models for autoscaling decisions. Choose the model that best fits your needs - from lightweight local models to powerful cloud LLMs.
+
+### Quick Start
+
+```bash
+# List available models from Docker Model Runner
+./docktor config list-models
+
+# Switch to a specific model
+./docktor config set-model ai/granite-4.0-h-micro
+
+# Switch to OpenAI
+./docktor config set-model gpt-4o-mini --provider=openai --base-url=https://api.openai.com/v1
+# Then set: export OPENAI_API_KEY=sk-...
+
+# Start daemon with selected model
+./docktor daemon start
+```
+
+### Model Providers
+
+**Docker Model Runner (DMR) - Recommended for Local**
+- ✅ Completely free and private
+- ✅ No API keys required
+- ✅ Works offline
+- Available models: Llama 3.2, IBM Granite, Phi-3, SmolLM2, and more
+
+**OpenAI-Compatible Providers**
+- OpenAI (GPT-4, GPT-4o-mini)
+- Anthropic Claude (via proxy)
+- Azure OpenAI
+- Any OpenAI-compatible endpoint
+
+### Configuration
+
+The LLM configuration is stored in `docktor.yaml`:
+
+```yaml
+llm:
+  provider: dmr                                          # "dmr" or "openai"
+  base_url: "http://localhost:12434/engines/llama.cpp/v1"  # API endpoint
+  model: "ai/llama3.2"                                   # Model ID
+
+# For OpenAI or compatible providers:
+# llm:
+#   provider: openai
+#   base_url: "https://api.openai.com/v1"
+#   model: "gpt-4o-mini"
+# Then: export OPENAI_API_KEY=sk-...
+```
+
+### Decision Provenance
+
+Every autoscaling decision includes metadata showing which model made it:
+
+```json
+{
+  "timestamp": "2024-03-15T10:30:45Z",
+  "iteration": 42,
+  "avg_cpu": 87.3,
+  "action": "scale_up",
+  "current_replicas": 2,
+  "target_replicas": 4,
+  "reason": "CPU high at 87.3%",
+  "metadata": {
+    "provider": "dmr",
+    "model": "ai/granite-4.0-h-micro"
+  }
+}
+```
+
+This allows you to:
+- Compare decision quality across different models
+- Audit which model was active during incidents
+- Benchmark model performance for your workload
+
+### Example: Switching Models
+
+```bash
+# Test with Llama 3.2 (fast, lightweight)
+./docktor config set-model ai/llama3.2
+./docktor daemon start
+# ... observe scaling behavior ...
+./docktor daemon stop
+
+# Test with IBM Granite (enterprise-grade)
+./docktor config set-model ai/granite-4.0-h-micro
+./docktor daemon start
+# ... compare decision quality ...
+./docktor daemon stop
+
+# Compare logs to see which model performed better
+grep '"metadata"' /tmp/docktor-daemon.log | jq '.metadata.model' | sort | uniq -c
+```
+
 ### ⚠️ Known Limitations
 
 **Llama 3.2 (3B) Model Constraints:**
@@ -373,22 +472,33 @@ agents:
 
 ### Model Selection
 
-**Docker Model Runner (Automatic)**
+**Using Docker Model Runner (Local)**
 ```bash
-# Detected automatically, .env.cagent is auto-created
-./docktor ai up
+# List available models
+./docktor config list-models
+
+# Switch to any available model
+./docktor config set-model ai/llama3.2
+./docktor config set-model ai/granite-4.0-h-micro
+./docktor config set-model ai/smollm2
+
+# Start daemon with selected model
+./docktor daemon start
 ```
 
-**Cloud LLMs (Manual Setup)**
+**Using Cloud LLMs**
 ```bash
-# Create .env.cagent with:
-OPENAI_BASE_URL=https://api.openai.com/v1
-OPENAI_API_KEY=sk-your-key-here
-OPENAI_MODEL=gpt-4
+# Switch to OpenAI
+./docktor config set-model gpt-4o-mini --provider=openai --base-url=https://api.openai.com/v1
 
-# Then run:
-./docktor ai up
+# Set API key
+export OPENAI_API_KEY=sk-your-key-here
+
+# Start daemon
+./docktor daemon start
 ```
+
+See the [LLM Model Selection](#-llm-model-selection) section for full details.
 
 ### Monitoring Window
 
@@ -520,12 +630,15 @@ echo '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"detect_ano
   - Monitors every 10 seconds and scales automatically based on CPU thresholds
 - [ ] **Multi-Service Scaling**: Scale multiple services simultaneously
 - [ ] **Memory/Network Metrics**: Beyond just CPU%
-- [ ] **Selectable LLM Models**: Let users choose which model to use
-  - Support all models from Docker Model Runner (Llama 3.2, 3.3, Phi-3, Gemma, etc.)
-  - Quick switch: `docktor config set-model llama3.3:70b`
-  - Model profiles: "fast" (3B), "balanced" (8B), "smart" (70B)
-  - Per-environment configs: dev uses small, prod uses large
-  - Auto-fallback if model unavailable
+- [x] **Selectable LLM Models**: Choose which model to use via CLI
+  - ✅ List available models: `./docktor config list-models`
+  - ✅ Switch models: `./docktor config set-model ai/granite-4.0-h-micro`
+  - ✅ Support all Docker Model Runner models (Llama, Granite, Phi-3, Gemma, etc.)
+  - ✅ Support OpenAI-compatible providers (OpenAI, Anthropic via proxies, etc.)
+  - ✅ Per-app configs via `docktor.yaml`
+  - ✅ Decision provenance: metadata tracks which model made each scaling decision
+  - [ ] Model profiles: "fast" (3B), "balanced" (8B), "smart" (70B)
+  - [ ] Auto-fallback if model unavailable
 - [ ] **Predictive Scaling**: ML-based load forecasting
 - [ ] **Cost Optimization**: Prefer fewer large vs many small replicas
 

@@ -59,6 +59,7 @@ func usage() {
 	fmt.Println(`docktor CLI
 Usage:
   docktor daemon <start|stop|status|logs> [options]
+  docktor config <list-models|set-model> [options]
   docktor ai up [--debug] [--no-install] [--skip-compose] [--headless]
 
 Commands:
@@ -73,6 +74,12 @@ Commands:
     status  Check daemon status
     logs    Follow daemon logs
 
+  config    Configure LLM model selection
+    list-models       List available models from Docker Model Runner
+    set-model <ID>    Set the active model
+            --provider=dmr|openai: LLM provider (default: keeps current)
+            --base-url=<URL>: API base URL (default: keeps current)
+
   ai up     Launch AI autoscaling agent (legacy interactive mode)
             --debug: Enable verbose logging
             --headless: Run autoscaling loop without TUI
@@ -80,6 +87,11 @@ Commands:
             --skip-compose: Skip docker compose up/down (agent monitors existing containers)
 
 Examples:
+  # Configure LLM model
+  docktor config list-models
+  docktor config set-model granite-4.0-1b
+  docktor config set-model gpt-4o-mini --provider=openai --base-url=https://api.openai.com/v1
+
   # Start autonomous daemon (default - auto-approves all actions)
   docktor daemon start
 
@@ -118,10 +130,11 @@ type daemonOpts struct {
 
 // Config represents docktor.yaml configuration
 type Config struct {
-	Version     string       `yaml:"version"`
-	Service     string       `yaml:"service"`
-	ComposeFile string       `yaml:"compose_file"`
+	Version     string        `yaml:"version"`
+	Service     string        `yaml:"service"`
+	ComposeFile string        `yaml:"compose_file"`
 	Scaling     ScalingConfig `yaml:"scaling"`
+	LLM         LLMConfig     `yaml:"llm"`
 }
 
 // ScalingConfig holds scaling thresholds and parameters
@@ -134,6 +147,13 @@ type ScalingConfig struct {
 	ScaleDownBy   int     `yaml:"scale_down_by"`
 	CheckInterval int     `yaml:"check_interval"`
 	MetricsWindow int     `yaml:"metrics_window"`
+}
+
+// LLMConfig holds LLM provider settings
+type LLMConfig struct {
+	Provider string `yaml:"provider"` // "dmr" or "openai"
+	BaseURL  string `yaml:"base_url"`
+	Model    string `yaml:"model"`
 }
 
 // DefaultConfig returns config with sensible defaults
@@ -151,6 +171,11 @@ func DefaultConfig() Config {
 			ScaleDownBy:   1,
 			CheckInterval: 10,
 			MetricsWindow: 10,
+		},
+		LLM: LLMConfig{
+			Provider: "dmr",
+			BaseURL:  "http://localhost:12434/engines/llama.cpp/v1",
+			Model:    "ai/llama3.2",
 		},
 	}
 }
@@ -279,6 +304,12 @@ func main() {
 			return
 		}
 		runAIUp(os.Args[3:])
+	case "config":
+		if len(os.Args) < 3 {
+			usage()
+			return
+		}
+		runConfig(os.Args[2], os.Args[3:])
 	case "mcp":
 		runMCP()
 	default:
@@ -304,6 +335,24 @@ func runDaemon(action string, args []string) {
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown daemon action: %s\n", action)
 		usage()
+		os.Exit(1)
+	}
+}
+
+func runConfig(action string, args []string) {
+	switch action {
+	case "list-models":
+		configListModels()
+	case "set-model":
+		if len(args) < 1 {
+			fmt.Fprintf(os.Stderr, "Error: model ID required\n")
+			fmt.Fprintf(os.Stderr, "Usage: docktor config set-model <MODEL_ID> [--provider=dmr|openai] [--base-url=<URL>]\n")
+			os.Exit(1)
+		}
+		configSetModel(args)
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown config action: %s\n", action)
+		fmt.Fprintf(os.Stderr, "Available actions: list-models, set-model\n")
 		os.Exit(1)
 	}
 }
@@ -949,6 +998,8 @@ func generateAgentConfig(sourceFile, targetFile string, cfg Config) error {
 	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_MAX_REPLICAS", fmt.Sprintf("%d", cfg.Scaling.MaxReplicas))
 	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_SCALE_UP_BY", fmt.Sprintf("%d", cfg.Scaling.ScaleUpBy))
 	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_SCALE_DOWN_BY", fmt.Sprintf("%d", cfg.Scaling.ScaleDownBy))
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_LLM_PROVIDER", cfg.LLM.Provider)
+	instruction = strings.ReplaceAll(instruction, "$DOCKTOR_LLM_MODEL", cfg.LLM.Model)
 
 	docktor["instruction"] = instruction
 
@@ -1035,29 +1086,58 @@ func daemonStart(args []string, pidFile, logFile string) {
 	fmt.Printf("Starting Docker Compose stack (%s)...\n", composeFile)
 	must(run("docker", "compose", "-f", composeFile, "up", "-d", "--scale", fmt.Sprintf("%s=%d", cfg.Service, cfg.Scaling.MinReplicas)))
 
-	// Detect LLM backend
-	useDMR := probeURL(modelRunnerEngineURL) || probeURL(modelRunnerV1URL)
+	// Configure LLM based on config
 	var agentFile string
-	if !fileExists(envFile) {
-		if useDMR {
-			content := fmt.Sprintf("OPENAI_BASE_URL=%s\nOPENAI_API_KEY=dummy\nOPENAI_MODEL=dmr/ai/llama3.2\n", modelRunnerBaseURL)
-			_ = os.WriteFile(envFile, []byte(content), 0644)
-			fmt.Println("▶ Using Docker Model Runner with Llama 3.2")
-		} else {
-			fmt.Fprintln(os.Stderr, "ERROR: No Docker Model Runner detected and no .env.cagent for Gateway/OpenAI.")
-			fmt.Fprintln(os.Stderr, "Create .env.cagent with:")
-			fmt.Fprintln(os.Stderr, "  OPENAI_BASE_URL=https://api.openai.com/v1 (or your gateway)")
-			fmt.Fprintln(os.Stderr, "  OPENAI_API_KEY=sk-...")
-			fmt.Fprintln(os.Stderr, "  OPENAI_MODEL=gpt-4")
+	apiKey := ""
+
+	switch cfg.LLM.Provider {
+	case "dmr":
+		// Docker Model Runner - use DMR agent with dummy API key
+		agentFile = agentDMR
+		apiKey = "dummy"
+
+		// Verify DMR is reachable
+		if !probeURL(cfg.LLM.BaseURL + "/models") {
+			fmt.Fprintf(os.Stderr, "\n❌ Error: Cannot connect to Docker Model Runner at %s\n\n", cfg.LLM.BaseURL)
+			fmt.Fprintln(os.Stderr, "Please ensure:")
+			fmt.Fprintln(os.Stderr, "  1. Docker Desktop is running")
+			fmt.Fprintln(os.Stderr, "  2. Model Runner is enabled (Settings → Features in development)")
+			fmt.Fprintln(os.Stderr, "  3. At least one model is pulled\n")
 			_ = run("docker", "compose", "-f", composeFile, "down")
 			os.Exit(1)
 		}
+
+		fmt.Printf("▶ Using Docker Model Runner: %s\n", cfg.LLM.Model)
+
+	case "openai":
+		// OpenAI-compatible provider - use cloud agent
+		agentFile = agentCloud
+
+		// Check for API key
+		apiKey = os.Getenv("OPENAI_API_KEY")
+		if apiKey == "" {
+			fmt.Fprintln(os.Stderr, "\n❌ Error: OPENAI_API_KEY environment variable not set\n")
+			fmt.Fprintln(os.Stderr, "For OpenAI provider, you must set:")
+			fmt.Fprintln(os.Stderr, "  export OPENAI_API_KEY=sk-...")
+			fmt.Fprintln(os.Stderr, "\nOr use Docker Model Runner:")
+			fmt.Fprintln(os.Stderr, "  docktor config set-model <MODEL> --provider=dmr\n")
+			_ = run("docker", "compose", "-f", composeFile, "down")
+			os.Exit(1)
+		}
+
+		fmt.Printf("▶ Using OpenAI-compatible provider: %s\n", cfg.LLM.Model)
+
+	default:
+		fmt.Fprintf(os.Stderr, "Error: Unknown LLM provider '%s' (must be 'dmr' or 'openai')\n", cfg.LLM.Provider)
+		os.Exit(1)
 	}
 
-	if useDMR {
-		agentFile = agentDMR
-	} else {
-		agentFile = agentCloud
+	// Write .env.cagent with LLM config
+	envContent := fmt.Sprintf("OPENAI_BASE_URL=%s\nOPENAI_API_KEY=%s\nOPENAI_MODEL=%s\n",
+		cfg.LLM.BaseURL, apiKey, cfg.LLM.Model)
+	if err := os.WriteFile(envFile, []byte(envContent), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing .env.cagent: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Generate runtime agent config with substituted values
@@ -1075,6 +1155,9 @@ func daemonStart(args []string, pidFile, logFile string) {
 	fmt.Printf("Service: %s\n", cfg.Service)
 	fmt.Printf("Agent: %s\n", filepath.Base(agentFile))
 	fmt.Printf("Log: %s\n", logFile)
+	fmt.Printf("\nLLM Config:\n")
+	fmt.Printf("  Provider: %s\n", cfg.LLM.Provider)
+	fmt.Printf("  Model: %s\n", cfg.LLM.Model)
 	fmt.Printf("\nScaling Config:\n")
 	fmt.Printf("  CPU Thresholds: %.0f%% (high) / %.0f%% (low)\n", cfg.Scaling.CPUHigh, cfg.Scaling.CPULow)
 	fmt.Printf("  Replicas: %d (min) / %d (max)\n", cfg.Scaling.MinReplicas, cfg.Scaling.MaxReplicas)
@@ -1097,6 +1180,8 @@ func daemonStart(args []string, pidFile, logFile string) {
 		fmt.Sprintf("DOCKTOR_SCALE_UP_BY=%d", cfg.Scaling.ScaleUpBy),
 		fmt.Sprintf("DOCKTOR_SCALE_DOWN_BY=%d", cfg.Scaling.ScaleDownBy),
 		fmt.Sprintf("DOCKTOR_METRICS_WINDOW=%d", cfg.Scaling.MetricsWindow),
+		fmt.Sprintf("DOCKTOR_LLM_PROVIDER=%s", cfg.LLM.Provider),
+		fmt.Sprintf("DOCKTOR_LLM_MODEL=%s", cfg.LLM.Model),
 	)
 
 	// Create log file
@@ -1313,4 +1398,146 @@ func fileExists(p string) bool {
 func installCagent() {
 	fmt.Println("cagent not found. Attempting 'brew install cagent'...")
 	_ = run("brew", "install", "cagent")
+}
+
+// configListModels lists available models from DMR
+func configListModels() {
+	cfg, _ := LoadConfig("")
+
+	fmt.Println("🔍 Discovering models from Docker Model Runner...")
+	fmt.Printf("   Base URL: %s\n\n", cfg.LLM.BaseURL)
+
+	// Try to fetch models from DMR
+	models, err := fetchDMRModels(cfg.LLM.BaseURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "❌ Unable to connect to Docker Model Runner\n\n")
+		fmt.Fprintf(os.Stderr, "Error: %v\n\n", err)
+		fmt.Fprintf(os.Stderr, "Please ensure:\n")
+		fmt.Fprintf(os.Stderr, "  1. Docker Desktop is running\n")
+		fmt.Fprintf(os.Stderr, "  2. Model Runner is enabled in Docker Desktop settings\n")
+		fmt.Fprintf(os.Stderr, "  3. At least one model is pulled/running\n\n")
+		fmt.Fprintf(os.Stderr, "To enable Model Runner:\n")
+		fmt.Fprintf(os.Stderr, "  → Open Docker Desktop\n")
+		fmt.Fprintf(os.Stderr, "  → Go to Settings → Features in development\n")
+		fmt.Fprintf(os.Stderr, "  → Enable 'Docker Model Runner'\n")
+		os.Exit(1)
+	}
+
+	if len(models) == 0 {
+		fmt.Println("⚠️  No models found")
+		fmt.Println("\nTip: Pull a model first, e.g.:")
+		fmt.Println("  docker model pull granite-4.0-1b")
+		return
+	}
+
+	fmt.Printf("✓ Found %d model(s):\n\n", len(models))
+	for _, model := range models {
+		if model == cfg.LLM.Model {
+			fmt.Printf("  • %s [currently selected]\n", model)
+		} else {
+			fmt.Printf("  • %s\n", model)
+		}
+	}
+
+	fmt.Println("\nTo select a model:")
+	fmt.Println("  docktor config set-model <MODEL_ID>")
+}
+
+// configSetModel updates the model in docktor.yaml
+func configSetModel(args []string) {
+	modelID := args[0]
+
+	// Parse optional flags
+	provider := ""
+	baseURL := ""
+
+	for _, arg := range args[1:] {
+		if strings.HasPrefix(arg, "--provider=") {
+			provider = strings.TrimPrefix(arg, "--provider=")
+		} else if strings.HasPrefix(arg, "--base-url=") {
+			baseURL = strings.TrimPrefix(arg, "--base-url=")
+		}
+	}
+
+	// Load or create config
+	configPath := "docktor.yaml"
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		cfg = DefaultConfig()
+	}
+
+	// Update LLM config
+	if provider != "" {
+		cfg.LLM.Provider = provider
+	}
+	if baseURL != "" {
+		cfg.LLM.BaseURL = baseURL
+	}
+	cfg.LLM.Model = modelID
+
+	// Validate provider
+	if cfg.LLM.Provider != "dmr" && cfg.LLM.Provider != "openai" {
+		fmt.Fprintf(os.Stderr, "Error: provider must be 'dmr' or 'openai', got '%s'\n", cfg.LLM.Provider)
+		os.Exit(1)
+	}
+
+	// Save config
+	if err := SaveConfig(configPath, cfg); err != nil {
+		fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("✓ Model configuration updated")
+	fmt.Println()
+	fmt.Printf("  Provider:  %s\n", cfg.LLM.Provider)
+	fmt.Printf("  Base URL:  %s\n", cfg.LLM.BaseURL)
+	fmt.Printf("  Model:     %s\n", cfg.LLM.Model)
+	fmt.Println()
+	fmt.Printf("Saved to: %s\n", configPath)
+}
+
+// fetchDMRModels fetches available models from Docker Model Runner
+func fetchDMRModels(baseURL string) ([]string, error) {
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	resp, err := client.Get(baseURL + "/models")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("DMR returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	models := make([]string, len(result.Data))
+	for i, m := range result.Data {
+		models[i] = m.ID
+	}
+
+	return models, nil
+}
+
+// SaveConfig saves configuration to YAML file
+func SaveConfig(path string, cfg Config) error {
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %w", err)
+	}
+
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+
+	return nil
 }

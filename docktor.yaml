@@ -1,33 +1,16 @@
-# Docktor Configuration
-# Place this file alongside your docker-compose.yaml
-
 version: "1"
-
-# Service to monitor and scale
 service: web
-
-# Docker Compose file path (relative to this config file, or absolute)
 compose_file: examples/docker-compose.yaml
-
-# Scaling behavior configuration
 scaling:
-  # CPU thresholds (percentage 0-100)
-  cpu_high: 75.0      # Scale up when average CPU >= this threshold
-  cpu_low: 20.0       # Scale down when average CPU <= this threshold
-
-  # Replica constraints
-  min_replicas: 2     # Minimum replicas (never scale below this for HA)
-  max_replicas: 10    # Maximum replicas (cost/capacity limit)
-
-  # Scaling increments
-  scale_up_by: 2      # Number of replicas to add when scaling up
-  scale_down_by: 1    # Number of replicas to remove when scaling down
-
-  # Timing configuration
-  check_interval: 10  # Seconds between autoscaling checks
-  metrics_window: 10  # Seconds to collect and average metrics over
-
-# Optional: Agent configuration override
-# agent:
-#   model: dmr/ai/llama3.2
-#   agent_file: agents/docktor.dmr.yaml
+    cpu_high: 75
+    cpu_low: 20
+    min_replicas: 2
+    max_replicas: 10
+    scale_up_by: 2
+    scale_down_by: 1
+    check_interval: 10
+    metrics_window: 10
+llm:
+    provider: dmr
+    base_url: http://localhost:12434/engines/llama.cpp/v1
+    model: ai/llama3.2
