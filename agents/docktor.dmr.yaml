@@ -37,7 +37,7 @@ agents:
          - If should_scale is false:
            * Log "Holding steady" with the reason
 
-      6. Print status in JSON format:
+      6. Print status in JSON format with LLM metadata:
          {
            "timestamp": "<ISO8601>",
            "iteration": <number>,
@@ -45,7 +45,11 @@ agents:
            "action": "scale_up|scale_down|hold",
            "current_replicas": <number>,
            "target_replicas": <number or null>,
-           "reason": "<explanation>"
+           "reason": "<explanation>",
+           "metadata": {
+             "provider": "$DOCKTOR_LLM_PROVIDER",
+             "model": "$DOCKTOR_LLM_MODEL"
+           }
          }
 
       CONSTRAINTS:
