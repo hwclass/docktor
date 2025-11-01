@@ -1,0 +1,51 @@
+version: "1"
+compose_file: docker-compose.yaml
+
+llm:
+  provider: dmr
+  base_url: "http://localhost:12434/engines/llama.cpp/v1"
+  model: "ai/llama3.2"
+
+# Multi-service configuration with queue awareness
+services:
+  - name: consumer
+    min_replicas: 1
+    max_replicas: 10
+    metrics_window: 10      # seconds to collect metrics
+    check_interval: 10      # seconds between scaling decisions
+
+    rules:
+      scale_up_when:
+        # Scale up if EITHER condition is true (OR logic)
+        - metric: queue.backlog
+          op: ">"
+          value: 500          # More than 500 messages pending
+        - metric: queue.rate_in
+          op: ">"
+          value: 200          # Incoming rate > 200 msgs/sec
+
+      scale_down_when:
+        # Scale down if ALL conditions are true (AND logic)
+        - metric: queue.backlog
+          op: "<="
+          value: 100          # Backlog under 100 messages
+        - metric: queue.rate_in
+          op: "<"
+          value: 150          # Incoming rate < 150 msgs/sec
+
+    queue:
+      kind: nats
+      url: nats://nats:4222
+      jetstream: true
+      stream: EVENTS
+      consumer: WEB_WORKERS
+      subject: events.web
+      metrics:
+        - backlog
+        - lag
+        - rate_in
+        - rate_out
+
+# Note: This configuration demonstrates queue-aware autoscaling
+# The consumer service will scale based on NATS JetStream metrics
+# rather than CPU usage, making it ideal for message processing workloads

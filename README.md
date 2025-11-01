@@ -32,10 +32,10 @@ go build -o docktor ./cmd/docktor
 
 # 3. Generate load to trigger scaling (in another terminal)
 # Option A: Incremental load simulator (recommended for demos)
-bash examples/load-incremental.sh
+bash examples/single-service/load-incremental.sh
 
 # Option B: Quick test - instant high load (90 seconds)
-bash examples/load-quick.sh
+bash examples/single-service/load-quick.sh
 
 # 4. Monitor daemon in real-time
 ./docktor daemon logs
@@ -136,6 +136,137 @@ scaling:
 | `scaling.scale_down_by` | int | `1` | Replicas to remove when scaling down |
 | `scaling.check_interval` | int | `10` | Seconds between autoscaling checks |
 | `scaling.metrics_window` | int | `10` | Seconds to collect and average metrics |
+
+###  Multi-Service & Queue-Aware Scaling
+
+Docktor supports monitoring multiple services simultaneously with queue-aware autoscaling (NATS JetStream, RabbitMQ, Kafka coming soon).
+
+#### Multi-Service Configuration
+
+```yaml
+# docktor.yaml
+version: "1"
+compose_file: docker-compose.yaml
+
+# Monitor multiple services with different configs
+services:
+  - name: web
+    min_replicas: 2
+    max_replicas: 10
+    check_interval: 10
+    metrics_window: 10
+    rules:
+      scale_up_when:
+        - metric: cpu.avg
+          op: ">"
+          value: 75.0
+      scale_down_when:
+        - metric: cpu.avg
+          op: "<"
+          value: 20.0
+
+  - name: consumer
+    min_replicas: 1
+    max_replicas: 20
+    check_interval: 10
+    metrics_window: 10
+    rules:
+      scale_up_when:
+        # OR logic: scale if ANY condition matches
+        - metric: queue.backlog
+          op: ">"
+          value: 500
+        - metric: queue.rate_in
+          op: ">"
+          value: 200
+      scale_down_when:
+        # AND logic: scale only if ALL conditions match
+        - metric: queue.backlog
+          op: "<="
+          value: 100
+        - metric: queue.rate_in
+          op: "<"
+          value: 150
+    queue:
+      kind: nats
+      url: nats://nats:4222
+      jetstream: true
+      stream: EVENTS
+      consumer: WEB_WORKERS
+      subject: events.web
+```
+
+#### Available Metrics
+
+**CPU Metrics** (always available):
+- `cpu.avg` - Average CPU across all containers
+- `cpu.min` - Minimum CPU
+- `cpu.max` - Maximum CPU
+
+**Queue Metrics** (when queue configured):
+- `queue.backlog` - Pending messages for consumer
+- `queue.lag` - Messages between stream head and consumer
+- `queue.rate_in` - Incoming message rate (msgs/sec)
+- `queue.rate_out` - Processing rate (msgs/sec)
+
+#### Scaling Logic
+
+**Scale-up rules**: OR logic - scale if **any** condition matches
+**Scale-down rules**: AND logic - scale only if **all** conditions match
+
+This prevents premature scale-down while allowing quick scale-up response.
+
+#### Example: NATS JetStream Queue Scaling
+
+```bash
+# Run the complete NATS example
+cd examples/multi-service/nats-queue
+docker compose up -d
+cd ../../..
+./docktor daemon start --config examples/multi-service/nats-queue/docktor.yaml
+
+# Monitor scaling decisions
+./docktor explain --tail 20
+
+# Validate configuration
+./docktor config validate
+```
+
+📖 **Full NATS example**: See [examples/multi-service/nats-queue/README.md](examples/multi-service/nats-queue/README.md)
+
+#### Queue Plugin Architecture
+
+Docktor uses an extensible plugin system for queue backends. Current and planned support:
+
+| Queue System | Status | Metrics Available | Plugin Location |
+|-------------|--------|-------------------|-----------------|
+| **NATS JetStream** | ✅ **Available** | backlog, lag, rate_in, rate_out | [pkg/queue/nats.go](pkg/queue/nats.go) |
+| **RabbitMQ** | 🔜 Planned | queue depth, consumer count, rates | Coming soon |
+| **Apache Kafka** | 🔜 Planned | consumer lag, partition offset | Coming soon |
+| **Redis Streams** | 🔜 Planned | pending entries, consumer group lag | Coming soon |
+| **AWS SQS** | 🔜 Planned | messages available, in-flight | Coming soon |
+
+**Adding New Queue Backends:**
+
+The plugin interface is defined in [pkg/queue/queue.go](pkg/queue/queue.go):
+
+```go
+type Provider interface {
+    Connect() error
+    GetMetrics(windowSec int) (*Metrics, error)
+    Validate() error
+    Close() error
+}
+```
+
+To add a new queue backend:
+1. Implement the `Provider` interface
+2. Register via `queue.Register("yourqueue", NewYourQueueProvider)` in `init()`
+3. Add configuration in `docktor.yaml` with `kind: yourqueue`
+
+See [pkg/queue/nats.go](pkg/queue/nats.go) as a reference implementation.
+
+---
 
 📚 **See [AGENTS.md](AGENTS.md)** for agent instruction details and the [agents.md](https://agents.md/) specification.
 
