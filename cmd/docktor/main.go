@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hwclass/docktor/pkg/queue"
+	_ "github.com/hwclass/docktor/pkg/queue" // Import queue plugins for auto-registration
 	"gopkg.in/yaml.v3"
 )
 
@@ -50,7 +52,7 @@ func printBanner() {
        | |) / _ \/ _| / /  _|| '_/ _ \| '_|
        |___/\___/\__|_\_\\__||_| \___/|_|
 ` + reset + `
-   🐳 AI-Native Autoscaling for Docker Compose
+   🐳 AI-Native Autoscaling for Containers (built on Docker’s AI stack)
    ` + cyan + `https://github.com/hwclass/docktor` + reset + `
 `)
 }
@@ -59,7 +61,8 @@ func usage() {
 	fmt.Println(`docktor CLI
 Usage:
   docktor daemon <start|stop|status|logs> [options]
-  docktor config <list-models|set-model> [options]
+  docktor config <list-models|set-model|validate> [options]
+  docktor explain [--tail N] [--service NAME]
   docktor ai up [--debug] [--no-install] [--skip-compose] [--headless]
 
 Commands:
@@ -79,6 +82,11 @@ Commands:
     set-model <ID>    Set the active model
             --provider=dmr|openai: LLM provider (default: keeps current)
             --base-url=<URL>: API base URL (default: keeps current)
+    validate          Validate configuration and connectivity
+
+  explain   Show scaling decision history
+            --tail N: Show last N decisions (default: 10)
+            --service NAME: Filter by service name
 
   ai up     Launch AI autoscaling agent (legacy interactive mode)
             --debug: Enable verbose logging
@@ -130,11 +138,12 @@ type daemonOpts struct {
 
 // Config represents docktor.yaml configuration
 type Config struct {
-	Version     string        `yaml:"version"`
-	Service     string        `yaml:"service"`
-	ComposeFile string        `yaml:"compose_file"`
-	Scaling     ScalingConfig `yaml:"scaling"`
-	LLM         LLMConfig     `yaml:"llm"`
+	Version     string          `yaml:"version"`
+	Service     string          `yaml:"service,omitempty"` // Legacy: single service name (backward compatible)
+	ComposeFile string          `yaml:"compose_file"`
+	Scaling     ScalingConfig   `yaml:"scaling,omitempty"` // Legacy: single service scaling config
+	LLM         LLMConfig       `yaml:"llm"`
+	Services    []ServiceConfig `yaml:"services,omitempty"` // New: multi-service configuration
 }
 
 // ScalingConfig holds scaling thresholds and parameters
@@ -154,6 +163,41 @@ type LLMConfig struct {
 	Provider string `yaml:"provider"` // "dmr" or "openai"
 	BaseURL  string `yaml:"base_url"`
 	Model    string `yaml:"model"`
+}
+
+// Condition represents a single rule condition for scaling
+type Condition struct {
+	Metric string  `yaml:"metric"` // e.g., "cpu.avg_pct", "queue.backlog"
+	Op     string  `yaml:"op"`     // ">", ">=", "<", "<=", "==", "!="
+	Value  float64 `yaml:"value"`
+}
+
+// Rules defines when to scale up or down
+type Rules struct {
+	ScaleUpWhen   []Condition `yaml:"scale_up_when"`   // Scale up if ANY condition matches (OR)
+	ScaleDownWhen []Condition `yaml:"scale_down_when"` // Scale down if ALL conditions match (AND)
+}
+
+// QueueConfig holds queue/messaging system configuration
+type QueueConfig struct {
+	Kind      string   `yaml:"kind"`      // "nats", "kafka", "rabbitmq", "sqs"
+	URL       string   `yaml:"url"`       // Connection URL
+	JetStream bool     `yaml:"jetstream"` // NATS: use JetStream
+	Stream    string   `yaml:"stream"`    // NATS: stream name
+	Consumer  string   `yaml:"consumer"`  // NATS: consumer name
+	Subject   string   `yaml:"subject"`   // NATS: subject filter
+	Metrics   []string `yaml:"metrics"`   // Metrics to collect: backlog, lag, rate_in, rate_out
+}
+
+// ServiceConfig holds per-service monitoring and scaling configuration
+type ServiceConfig struct {
+	Name          string       `yaml:"name"`
+	MinReplicas   int          `yaml:"min_replicas"`
+	MaxReplicas   int          `yaml:"max_replicas"`
+	MetricsWindow int          `yaml:"metrics_window"` // seconds
+	CheckInterval int          `yaml:"check_interval"` // seconds
+	Rules         Rules        `yaml:"rules"`
+	Queue         *QueueConfig `yaml:"queue,omitempty"` // Optional queue configuration
 }
 
 // DefaultConfig returns config with sensible defaults
@@ -223,7 +267,36 @@ func LoadConfig(path string) (Config, error) {
 		return cfg, fmt.Errorf("cpu_high must be > cpu_low")
 	}
 
+	// Normalize: convert legacy single-service format to multi-service format
+	cfg.Normalize()
+
 	return cfg, nil
+}
+
+// Normalize converts legacy single-service config to multi-service format for backward compatibility
+func (c *Config) Normalize() {
+	// If services array is empty but we have legacy Service/Scaling, convert it
+	if len(c.Services) == 0 && c.Service != "" {
+		// Convert legacy format to multi-service format
+		c.Services = []ServiceConfig{
+			{
+				Name:          c.Service,
+				MinReplicas:   c.Scaling.MinReplicas,
+				MaxReplicas:   c.Scaling.MaxReplicas,
+				MetricsWindow: c.Scaling.MetricsWindow,
+				CheckInterval: c.Scaling.CheckInterval,
+				Rules: Rules{
+					ScaleUpWhen: []Condition{
+						{Metric: "cpu.avg_pct", Op: ">", Value: c.Scaling.CPUHigh},
+					},
+					ScaleDownWhen: []Condition{
+						{Metric: "cpu.avg_pct", Op: "<", Value: c.Scaling.CPULow},
+					},
+				},
+				Queue: nil, // No queue in legacy format
+			},
+		}
+	}
 }
 
 func parseFlags(args []string) opts {
@@ -310,6 +383,8 @@ func main() {
 			return
 		}
 		runConfig(os.Args[2], os.Args[3:])
+	case "explain":
+		runExplain(os.Args[2:])
 	case "mcp":
 		runMCP()
 	default:
@@ -350,11 +425,105 @@ func runConfig(action string, args []string) {
 			os.Exit(1)
 		}
 		configSetModel(args)
+	case "validate":
+		configValidate()
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown config action: %s\n", action)
-		fmt.Fprintf(os.Stderr, "Available actions: list-models, set-model\n")
+		fmt.Fprintf(os.Stderr, "Available actions: list-models, set-model, validate\n")
 		os.Exit(1)
 	}
+}
+
+func runExplain(args []string) {
+	tail := 10
+	serviceFilter := ""
+
+	// Parse flags
+	for i := 0; i < len(args); i++ {
+		if strings.HasPrefix(args[i], "--tail=") {
+			tail, _ = strconv.Atoi(strings.TrimPrefix(args[i], "--tail="))
+		} else if args[i] == "--tail" && i+1 < len(args) {
+			tail, _ = strconv.Atoi(args[i+1])
+			i++
+		} else if strings.HasPrefix(args[i], "--service=") {
+			serviceFilter = strings.TrimPrefix(args[i], "--service=")
+		} else if args[i] == "--service" && i+1 < len(args) {
+			serviceFilter = args[i+1]
+			i++
+		}
+	}
+
+	// Read JSONL file
+	f, err := os.Open("/tmp/docktor-decisions.jsonl")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Cannot open decision log: %v\n", err)
+		fmt.Fprintf(os.Stderr, "The daemon may not have run yet or no decisions have been logged.\n")
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	// Parse all lines
+	type Decision struct {
+		Timestamp       string             `json:"timestamp"`
+		Service         string             `json:"service"`
+		Action          string             `json:"action"`
+		CurrentReplicas int                `json:"current_replicas"`
+		TargetReplicas  int                `json:"target_replicas"`
+		Reason          string             `json:"reason"`
+		Observations    map[string]float64 `json:"observations"`
+	}
+
+	var decisions []Decision
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var d Decision
+		if err := json.Unmarshal(scanner.Bytes(), &d); err == nil {
+			// Filter by service if specified
+			if serviceFilter == "" || d.Service == serviceFilter {
+				decisions = append(decisions, d)
+			}
+		}
+	}
+
+	if len(decisions) == 0 {
+		fmt.Println("No scaling decisions found.")
+		return
+	}
+
+	// Take last N decisions
+	start := 0
+	if len(decisions) > tail {
+		start = len(decisions) - tail
+	}
+	decisions = decisions[start:]
+
+	// Print table header
+	fmt.Printf("%-12s %-10s %-10s %-8s %-50s\n", "TIME", "SERVICE", "ACTION", "FROM→TO", "REASON")
+	fmt.Println(strings.Repeat("-", 100))
+
+	// Print decisions
+	for _, d := range decisions {
+		// Parse timestamp
+		ts, _ := time.Parse(time.RFC3339, d.Timestamp)
+		timeStr := ts.Format("15:04:05")
+
+		// Format replica change
+		replicaChange := fmt.Sprintf("%d→%d", d.CurrentReplicas, d.TargetReplicas)
+
+		// Truncate reason if too long
+		reason := d.Reason
+		if len(reason) > 50 {
+			reason = reason[:47] + "..."
+		}
+
+		fmt.Printf("%-12s %-10s %-10s %-8s %-50s\n", timeStr, d.Service, d.Action, replicaChange, reason)
+	}
+
+	fmt.Printf("\nShowing %d of %d total decisions", len(decisions), len(decisions)+start)
+	if serviceFilter != "" {
+		fmt.Printf(" (filtered by service: %s)", serviceFilter)
+	}
+	fmt.Println()
 }
 
 func runAIUp(args []string) {
@@ -580,8 +749,8 @@ func mcpToolsList(id json.RawMessage) {
 				"type":                 "object",
 				"additionalProperties": false,
 				"properties": map[string]interface{}{
-					"recommendation":    map[string]interface{}{"type": "string", "enum": []string{"scale_up", "scale_down", "hold"}},
-					"current_replicas":  map[string]interface{}{"type": "integer"},
+					"recommendation":   map[string]interface{}{"type": "string", "enum": []string{"scale_up", "scale_down", "hold"}},
+					"current_replicas": map[string]interface{}{"type": "integer"},
 				},
 				"required": []string{"recommendation", "current_replicas"},
 			},
@@ -632,6 +801,53 @@ func mcpToolsList(id json.RawMessage) {
 					"reason":          map[string]interface{}{"type": "string"},
 				},
 				"required": []string{"service", "target_replicas"},
+			},
+		},
+		{
+			Name:        "get_queue_metrics",
+			Description: "Collect queue metrics from NATS JetStream (backlog, lag, rates)",
+			InputSchema: map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"queue_config": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"kind":      map[string]interface{}{"type": "string"},
+							"url":       map[string]interface{}{"type": "string"},
+							"jetstream": map[string]interface{}{"type": "boolean"},
+							"stream":    map[string]interface{}{"type": "string"},
+							"consumer":  map[string]interface{}{"type": "string"},
+							"subject":   map[string]interface{}{"type": "string"},
+						},
+						"required": []string{"kind", "url"},
+					},
+					"window_sec": map[string]interface{}{"type": "integer"},
+				},
+				"required": []string{"queue_config", "window_sec"},
+			},
+		},
+		{
+			Name:        "decide_scale_multi",
+			Description: "Evaluate multi-metric scaling rules and decide action (scale_up/scale_down/hold)",
+			InputSchema: map[string]interface{}{
+				"type":                 "object",
+				"additionalProperties": false,
+				"properties": map[string]interface{}{
+					"service_name":     map[string]interface{}{"type": "string"},
+					"current_replicas": map[string]interface{}{"type": "integer"},
+					"min_replicas":     map[string]interface{}{"type": "integer"},
+					"max_replicas":     map[string]interface{}{"type": "integer"},
+					"rules": map[string]interface{}{
+						"type": "object",
+						"properties": map[string]interface{}{
+							"scale_up_when":   map[string]interface{}{"type": "array"},
+							"scale_down_when": map[string]interface{}{"type": "array"},
+						},
+					},
+					"observations": map[string]interface{}{"type": "object"},
+				},
+				"required": []string{"service_name", "current_replicas", "min_replicas", "max_replicas", "rules", "observations"},
 			},
 		},
 	}
@@ -693,8 +909,8 @@ func mcpToolsCall(id json.RawMessage, params json.RawMessage) {
 		})
 	case "calculate_target_replicas":
 		var in struct {
-			Recommendation   string `json:"recommendation"`
-			CurrentReplicas  int    `json:"current_replicas"`
+			Recommendation  string `json:"recommendation"`
+			CurrentReplicas int    `json:"current_replicas"`
 		}
 		_ = json.Unmarshal(p.Arguments, &in)
 		log.Printf("[MCP] calculate_target_replicas(recommendation=%s, current_replicas=%d)", in.Recommendation, in.CurrentReplicas)
@@ -760,6 +976,55 @@ func mcpToolsCall(id json.RawMessage, params json.RawMessage) {
 		writeRes(id, map[string]interface{}{
 			"content": []map[string]interface{}{
 				{"type": "text", "text": toJSON(map[string]interface{}{"valid": true, "message": fmt.Sprintf("scaled %s to %d. reason: %s", in.Service, in.TargetReplicas, in.Reason)})},
+			},
+			"isError": false,
+		})
+	case "get_queue_metrics":
+		var in struct {
+			QueueConfig QueueConfig `json:"queue_config"`
+			WindowSec   int         `json:"window_sec"`
+		}
+		_ = json.Unmarshal(p.Arguments, &in)
+		if in.WindowSec <= 0 {
+			in.WindowSec = 5
+		}
+		log.Printf("[MCP] get_queue_metrics(kind=%s, stream=%s, consumer=%s, window_sec=%d)",
+			in.QueueConfig.Kind, in.QueueConfig.Stream, in.QueueConfig.Consumer, in.WindowSec)
+		res, err := toolGetQueueMetrics(in.QueueConfig, in.WindowSec)
+		if err != nil {
+			log.Printf("[MCP] get_queue_metrics ERROR: %v", err)
+			writeErr(id, 1, err.Error())
+			return
+		}
+		log.Printf("[MCP] get_queue_metrics RESULT: %v", res)
+		writeRes(id, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": toJSON(res)},
+			},
+			"isError": false,
+		})
+	case "decide_scale_multi":
+		var in struct {
+			ServiceName     string             `json:"service_name"`
+			CurrentReplicas int                `json:"current_replicas"`
+			MinReplicas     int                `json:"min_replicas"`
+			MaxReplicas     int                `json:"max_replicas"`
+			Rules           Rules              `json:"rules"`
+			Observations    map[string]float64 `json:"observations"`
+		}
+		_ = json.Unmarshal(p.Arguments, &in)
+		log.Printf("[MCP] decide_scale_multi(service=%s, current=%d, min=%d, max=%d, observations=%v)",
+			in.ServiceName, in.CurrentReplicas, in.MinReplicas, in.MaxReplicas, in.Observations)
+		res, err := toolDecideScaleMulti(in.ServiceName, in.CurrentReplicas, in.MinReplicas, in.MaxReplicas, in.Rules, in.Observations)
+		if err != nil {
+			log.Printf("[MCP] decide_scale_multi ERROR: %v", err)
+			writeErr(id, 1, err.Error())
+			return
+		}
+		log.Printf("[MCP] decide_scale_multi RESULT: %v", res)
+		writeRes(id, map[string]interface{}{
+			"content": []map[string]interface{}{
+				{"type": "text", "text": toJSON(res)},
 			},
 			"isError": false,
 		})
@@ -898,9 +1163,9 @@ func toolCalculateTargetReplicas(recommendation string, currentReplicas int) (ma
 	}
 
 	return map[string]interface{}{
-		"action":          action,
-		"should_scale":    shouldScale,
-		"target_replicas": targetReplicas,
+		"action":           action,
+		"should_scale":     shouldScale,
+		"target_replicas":  targetReplicas,
 		"current_replicas": currentReplicas,
 	}, nil
 }
@@ -923,6 +1188,152 @@ func toolDetect(metrics map[string]float64, hi, lo float64) (string, string) {
 	default:
 		return "hold", fmt.Sprintf("avg_cpu %.1f within [%.1f, %.1f]", avg, lo, hi)
 	}
+}
+
+// toolGetQueueMetrics collects queue metrics using the queue plugin architecture
+func toolGetQueueMetrics(queueCfg QueueConfig, windowSec int) (map[string]float64, error) {
+	// Convert QueueConfig to queue.Config
+	cfg := queue.Config{
+		Kind: queueCfg.Kind,
+		URL:  queueCfg.URL,
+		Attributes: map[string]string{
+			"stream":    queueCfg.Stream,
+			"consumer":  queueCfg.Consumer,
+			"subject":   queueCfg.Subject,
+			"jetstream": fmt.Sprintf("%t", queueCfg.JetStream),
+		},
+	}
+
+	// Create provider
+	provider, err := queue.NewProvider(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create queue provider: %w", err)
+	}
+	defer provider.Close()
+
+	// Connect
+	if err := provider.Connect(); err != nil {
+		return nil, fmt.Errorf("failed to connect to queue: %w", err)
+	}
+
+	// Get metrics
+	metrics, err := provider.GetMetrics(windowSec)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get queue metrics: %w", err)
+	}
+
+	// Convert to map[string]float64 for MCP
+	result := map[string]float64{
+		"queue.backlog":  metrics.Backlog,
+		"queue.lag":      metrics.Lag,
+		"queue.rate_in":  metrics.RateIn,
+		"queue.rate_out": metrics.RateOut,
+	}
+
+	// Add custom metrics with queue prefix
+	for k, v := range metrics.Custom {
+		result["queue."+k] = v
+	}
+
+	return result, nil
+}
+
+// toolDecideScaleMulti evaluates multi-metric rules and decides scaling action
+func toolDecideScaleMulti(serviceName string, currentReplicas, minReplicas, maxReplicas int, rules Rules, observations map[string]float64) (map[string]interface{}, error) {
+	// Helper to evaluate a single condition
+	evaluateCondition := func(cond Condition) bool {
+		value, exists := observations[cond.Metric]
+		if !exists {
+			return false // Metric not available
+		}
+
+		switch cond.Op {
+		case ">":
+			return value > cond.Value
+		case ">=":
+			return value >= cond.Value
+		case "<":
+			return value < cond.Value
+		case "<=":
+			return value <= cond.Value
+		case "==":
+			return value == cond.Value
+		case "!=":
+			return value != cond.Value
+		default:
+			return false
+		}
+	}
+
+	// Evaluate scale_up_when (OR logic - any condition matches)
+	scaleUpMatches := []string{}
+	for _, cond := range rules.ScaleUpWhen {
+		if evaluateCondition(cond) {
+			val := observations[cond.Metric]
+			scaleUpMatches = append(scaleUpMatches, fmt.Sprintf("%s %.1f %s %.1f", cond.Metric, val, cond.Op, cond.Value))
+		}
+	}
+
+	// Evaluate scale_down_when (AND logic - all conditions must match)
+	scaleDownMatches := []string{}
+	allScaleDownMatch := len(rules.ScaleDownWhen) > 0
+	for _, cond := range rules.ScaleDownWhen {
+		if evaluateCondition(cond) {
+			val := observations[cond.Metric]
+			scaleDownMatches = append(scaleDownMatches, fmt.Sprintf("%s %.1f %s %.1f", cond.Metric, val, cond.Op, cond.Value))
+		} else {
+			allScaleDownMatch = false
+		}
+	}
+
+	// Decide action
+	var action string
+	var targetReplicas int
+	var reason string
+	var matchedRules []string
+
+	if len(scaleUpMatches) > 0 {
+		// Scale up: ANY condition matched
+		action = "scale_up"
+		targetReplicas = currentReplicas + 2 // TODO: make configurable via scale_up_by
+		if targetReplicas > maxReplicas {
+			targetReplicas = maxReplicas
+		}
+		reason = strings.Join(scaleUpMatches, " OR ")
+		matchedRules = scaleUpMatches
+	} else if allScaleDownMatch {
+		// Scale down: ALL conditions matched
+		action = "scale_down"
+		targetReplicas = currentReplicas - 1 // TODO: make configurable via scale_down_by
+		if targetReplicas < minReplicas {
+			targetReplicas = minReplicas
+		}
+		reason = strings.Join(scaleDownMatches, " AND ")
+		matchedRules = scaleDownMatches
+	} else {
+		// Hold
+		action = "hold"
+		targetReplicas = currentReplicas
+		reason = "no scaling conditions met"
+		matchedRules = []string{}
+	}
+
+	// Enforce bounds and convert to hold if no change
+	if targetReplicas == currentReplicas {
+		action = "hold"
+		if len(matchedRules) > 0 {
+			reason = fmt.Sprintf("already at target replicas (%d)", currentReplicas)
+		}
+	}
+
+	return map[string]interface{}{
+		"action":           action,
+		"target_replicas":  targetReplicas,
+		"current_replicas": currentReplicas,
+		"reason":           reason,
+		"policy":           "multi-metric evaluation",
+		"matched_rules":    matchedRules,
+	}, nil
 }
 
 func runMCP() {
@@ -1016,6 +1427,121 @@ func generateAgentConfig(sourceFile, targetFile string, cfg Config) error {
 	return nil
 }
 
+// monitorService runs the scaling loop for a single service
+func monitorService(svc ServiceConfig, logFh *os.File, composeFile string) {
+	checkInterval := time.Duration(svc.CheckInterval) * time.Second
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
+
+	log.Printf("[%s] Monitor started (interval=%ds, replicas=%d-%d)\n",
+		svc.Name, svc.CheckInterval, svc.MinReplicas, svc.MaxReplicas)
+
+	iteration := 0
+	for range ticker.C {
+		iteration++
+		runScalingIteration(svc, iteration, logFh, composeFile)
+	}
+}
+
+// runScalingIteration performs one scaling check for a service
+func runScalingIteration(svc ServiceConfig, iteration int, logFh *os.File, composeFile string) {
+	timestamp := time.Now()
+	fmt.Fprintf(logFh, "\n=== [%s] Iteration %d (%s) ===\n", svc.Name, iteration, timestamp.Format("15:04:05"))
+	logFh.Sync()
+
+	// 1. Get current replica count
+	currentReplicas, err := toolGetCurrentReplicas(svc.Name)
+	if err != nil {
+		fmt.Fprintf(logFh, "[%s] ERROR: Failed to get current replicas: %v\n", svc.Name, err)
+		return
+	}
+	fmt.Fprintf(logFh, "[%s] Current replicas: %d\n", svc.Name, currentReplicas)
+
+	// 2. Get CPU metrics
+	cpuMetrics, err := toolGetMetrics(svc.Name, svc.MetricsWindow)
+	if err != nil {
+		fmt.Fprintf(logFh, "[%s] ERROR: Failed to get CPU metrics: %v\n", svc.Name, err)
+		return
+	}
+
+	// 3. Merge all observations (start with CPU metrics)
+	observations := make(map[string]float64)
+	for k, v := range cpuMetrics {
+		observations[k] = v
+	}
+
+	// 4. Get queue metrics if configured
+	if svc.Queue != nil {
+		queueMetrics, err := toolGetQueueMetrics(*svc.Queue, svc.MetricsWindow)
+		if err != nil {
+			fmt.Fprintf(logFh, "[%s] WARNING: Failed to get queue metrics: %v\n", svc.Name, err)
+		} else {
+			for k, v := range queueMetrics {
+				observations[k] = v
+			}
+		}
+	}
+
+	fmt.Fprintf(logFh, "[%s] Observations: %v\n", svc.Name, observations)
+
+	// 5. Decide scaling action
+	decision, err := toolDecideScaleMulti(svc.Name, currentReplicas, svc.MinReplicas, svc.MaxReplicas, svc.Rules, observations)
+	if err != nil {
+		fmt.Fprintf(logFh, "[%s] ERROR: Failed to decide scaling: %v\n", svc.Name, err)
+		return
+	}
+
+	action := decision["action"].(string)
+	targetReplicas := int(decision["target_replicas"].(float64))
+	reason := decision["reason"].(string)
+
+	fmt.Fprintf(logFh, "[%s] Decision: %s (current=%d, target=%d, reason=%s)\n",
+		svc.Name, action, currentReplicas, targetReplicas, reason)
+
+	// 6. Execute scaling if needed
+	if action != "hold" {
+		fmt.Fprintf(logFh, "[%s] Executing: docker compose -f %s up -d --scale %s=%d\n",
+			svc.Name, composeFile, svc.Name, targetReplicas)
+
+		err := run("docker", "compose", "-f", composeFile, "up", "-d", "--scale", fmt.Sprintf("%s=%d", svc.Name, targetReplicas))
+		if err != nil {
+			fmt.Fprintf(logFh, "[%s] ERROR: Scaling failed: %v\n", svc.Name, err)
+		} else {
+			fmt.Fprintf(logFh, "[%s] ✓ Scaled successfully to %d replicas\n", svc.Name, targetReplicas)
+		}
+	}
+
+	// 7. Log decision to JSONL file
+	logDecisionJSONL(svc.Name, timestamp, action, currentReplicas, targetReplicas, reason, observations, decision)
+
+	logFh.Sync()
+}
+
+// logDecisionJSONL appends a decision record to /tmp/docktor-decisions.jsonl
+func logDecisionJSONL(service string, timestamp time.Time, action string, currentReplicas, targetReplicas int, reason string, observations map[string]float64, decision map[string]interface{}) {
+	entry := map[string]interface{}{
+		"timestamp":        timestamp.Format(time.RFC3339),
+		"service":          service,
+		"action":           action,
+		"current_replicas": currentReplicas,
+		"target_replicas":  targetReplicas,
+		"reason":           reason,
+		"observations":     observations,
+		"matched_rules":    decision["matched_rules"],
+	}
+
+	f, err := os.OpenFile("/tmp/docktor-decisions.jsonl", os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("ERROR: Failed to open decisions log: %v", err)
+		return
+	}
+	defer f.Close()
+
+	if err := json.NewEncoder(f).Encode(entry); err != nil {
+		log.Printf("ERROR: Failed to write decision log: %v", err)
+	}
+}
+
 func daemonStart(args []string, pidFile, logFile string) {
 	opts := parseDaemonFlags(args)
 
@@ -1038,6 +1564,9 @@ func daemonStart(args []string, pidFile, logFile string) {
 		os.Exit(1)
 	}
 
+	// Normalize config to multi-service format
+	cfg.Normalize()
+
 	// Track which config was loaded for logging
 	configSource := "built-in defaults"
 	if opts.configFile != "" {
@@ -1053,10 +1582,16 @@ func daemonStart(args []string, pidFile, logFile string) {
 		cfg.ComposeFile = opts.composeFile
 	}
 	if opts.service != "web" {
-		cfg.Service = opts.service
+		// Override first service name for backward compatibility
+		if len(cfg.Services) > 0 {
+			cfg.Services[0].Name = opts.service
+		}
 	}
 	if opts.checkInterval > 0 {
-		cfg.Scaling.CheckInterval = opts.checkInterval
+		// Override check interval for all services
+		for i := range cfg.Services {
+			cfg.Services[i].CheckInterval = opts.checkInterval
+		}
 	}
 
 	// Resolve compose file path (support both relative and absolute paths)
@@ -1082,9 +1617,13 @@ func daemonStart(args []string, pidFile, logFile string) {
 		os.Exit(1)
 	}
 
-	// Start compose stack with configured min_replicas
+	// Start compose stack with configured min_replicas for all services
 	fmt.Printf("Starting Docker Compose stack (%s)...\n", composeFile)
-	must(run("docker", "compose", "-f", composeFile, "up", "-d", "--scale", fmt.Sprintf("%s=%d", cfg.Service, cfg.Scaling.MinReplicas)))
+	scaleArgs := []string{"compose", "-f", composeFile, "up", "-d"}
+	for _, svc := range cfg.Services {
+		scaleArgs = append(scaleArgs, "--scale", fmt.Sprintf("%s=%d", svc.Name, svc.MinReplicas))
+	}
+	must(run("docker", scaleArgs...))
 
 	// Configure LLM based on config
 	var agentFile string
@@ -1152,116 +1691,48 @@ func daemonStart(args []string, pidFile, logFile string) {
 	fmt.Printf("Mode: %s\n", map[bool]string{true: "MANUAL", false: "AUTONOMOUS"}[opts.manual])
 	fmt.Printf("Config: %s\n", configSource)
 	fmt.Printf("Compose: %s\n", composeFile)
-	fmt.Printf("Service: %s\n", cfg.Service)
 	fmt.Printf("Agent: %s\n", filepath.Base(agentFile))
 	fmt.Printf("Log: %s\n", logFile)
 	fmt.Printf("\nLLM Config:\n")
 	fmt.Printf("  Provider: %s\n", cfg.LLM.Provider)
 	fmt.Printf("  Model: %s\n", cfg.LLM.Model)
-	fmt.Printf("\nScaling Config:\n")
-	fmt.Printf("  CPU Thresholds: %.0f%% (high) / %.0f%% (low)\n", cfg.Scaling.CPUHigh, cfg.Scaling.CPULow)
-	fmt.Printf("  Replicas: %d (min) / %d (max)\n", cfg.Scaling.MinReplicas, cfg.Scaling.MaxReplicas)
-	fmt.Printf("  Scale by: +%d / -%d replicas\n", cfg.Scaling.ScaleUpBy, cfg.Scaling.ScaleDownBy)
-	fmt.Printf("  Check Interval: %ds\n\n", cfg.Scaling.CheckInterval)
-
-	// Prepare cagent command template
-	cagentArgs := []string{"run", agentFile, "--agent", "docktor", "--env-from-file", envFile}
-	if !opts.manual {
-		cagentArgs = append(cagentArgs, "--yolo", "--tui=false")
+	fmt.Printf("\nServices (%d):\n", len(cfg.Services))
+	for _, svc := range cfg.Services {
+		fmt.Printf("  • %s: replicas=%d-%d, interval=%ds",
+			svc.Name, svc.MinReplicas, svc.MaxReplicas, svc.CheckInterval)
+		if svc.Queue != nil {
+			fmt.Printf(", queue=%s", svc.Queue.Kind)
+		}
+		fmt.Println()
 	}
-
-	cagentEnv := append(os.Environ(),
-		"DOCKTOR_COMPOSE_FILE="+composeFile,
-		fmt.Sprintf("DOCKTOR_SERVICE=%s", cfg.Service),
-		fmt.Sprintf("DOCKTOR_CPU_HIGH=%.0f", cfg.Scaling.CPUHigh),
-		fmt.Sprintf("DOCKTOR_CPU_LOW=%.0f", cfg.Scaling.CPULow),
-		fmt.Sprintf("DOCKTOR_MIN_REPLICAS=%d", cfg.Scaling.MinReplicas),
-		fmt.Sprintf("DOCKTOR_MAX_REPLICAS=%d", cfg.Scaling.MaxReplicas),
-		fmt.Sprintf("DOCKTOR_SCALE_UP_BY=%d", cfg.Scaling.ScaleUpBy),
-		fmt.Sprintf("DOCKTOR_SCALE_DOWN_BY=%d", cfg.Scaling.ScaleDownBy),
-		fmt.Sprintf("DOCKTOR_METRICS_WINDOW=%d", cfg.Scaling.MetricsWindow),
-		fmt.Sprintf("DOCKTOR_LLM_PROVIDER=%s", cfg.LLM.Provider),
-		fmt.Sprintf("DOCKTOR_LLM_MODEL=%s", cfg.LLM.Model),
-	)
+	fmt.Println()
 
 	// Create log file
 	logFh, err := os.Create(logFile)
 	must(err)
 
-	if opts.manual {
-		// Manual mode: single interactive session
-		cmd := exec.Command("cagent", cagentArgs...)
-		cmd.Env = cagentEnv
-		cmd.Stdin = os.Stdin
-		cmd.Stdout = logFh
-		cmd.Stderr = logFh
+	// Set global DOCKTOR_COMPOSE_FILE for MCP tools
+	os.Setenv("DOCKTOR_COMPOSE_FILE", composeFile)
 
-		must(cmd.Start())
-		must(os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", cmd.Process.Pid)), 0644))
+	// Write PID file
+	must(os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644))
 
-		fmt.Printf("✓ Daemon started successfully\n")
-		fmt.Printf("  PID: %d\n", cmd.Process.Pid)
-		fmt.Printf("  Logs: tail -f %s\n\n", logFile)
+	fmt.Printf("✓ Daemon started successfully\n")
+	fmt.Printf("  PID: %d\n", os.Getpid())
+	fmt.Printf("  Logs: tail -f %s\n\n", logFile)
 
-		go func() {
-			cmd.Wait()
-			os.Remove(pidFile)
-		}()
-	} else {
-		// Autonomous mode: restart cagent fresh each interval
-		// This ensures the model processes each check as a new session
-		checkInterval := time.Duration(cfg.Scaling.CheckInterval) * time.Second
-		prompt := fmt.Sprintf(`Perform scaling check:
-1. get_metrics(container_regex="%s", window_sec=%d)
-2. detect_anomalies(metrics, rules={cpu_high_pct: %.0f, cpu_low_pct: %.0f})
-3. Act on recommendation (scale if needed, within min=%d max=%d)
-4. Print JSON status update`,
-			cfg.Service, cfg.Scaling.MetricsWindow,
-			cfg.Scaling.CPUHigh, cfg.Scaling.CPULow,
-			cfg.Scaling.MinReplicas, cfg.Scaling.MaxReplicas)
-
-		// Start supervisor loop in background
-		go func() {
-			iteration := 0
-			for {
-				iteration++
-				fmt.Fprintf(logFh, "\n=== Iteration %d ===\n", iteration)
-				logFh.Sync()
-
-				cmd := exec.Command("cagent", cagentArgs...)
-				cmd.Env = cagentEnv
-				cmd.Stdin = strings.NewReader(prompt)
-				cmd.Stdout = logFh
-				cmd.Stderr = logFh
-
-				cmd.Run() // Run and wait for completion
-
-				// Wait before next check
-				time.Sleep(checkInterval)
-			}
-		}()
-
-		// Write a placeholder PID (the supervisor goroutine's parent)
-		must(os.WriteFile(pidFile, []byte(fmt.Sprintf("%d", os.Getpid())), 0644))
-
-		fmt.Printf("✓ Daemon started successfully\n")
-		fmt.Printf("  PID: %d (supervisor)\n", os.Getpid())
-		fmt.Printf("  Logs: tail -f %s\n\n", logFile)
-		fmt.Printf("  Mode: Restarting cagent every %ds\n\n", cfg.Scaling.CheckInterval)
-
-		fmt.Printf("Control:\n")
-		fmt.Printf("  docktor daemon status  # Check status\n")
-		fmt.Printf("  docktor daemon logs    # Follow logs\n")
-		fmt.Printf("  docktor daemon stop    # Stop daemon\n")
-
-		// Block forever - the supervisor loop runs in background
-		select {}
+	// Start multi-service monitoring
+	for _, svc := range cfg.Services {
+		go monitorService(svc, logFh, composeFile)
 	}
 
 	fmt.Printf("Control:\n")
 	fmt.Printf("  docktor daemon status  # Check status\n")
 	fmt.Printf("  docktor daemon logs    # Follow logs\n")
-	fmt.Printf("  docktor daemon stop    # Stop daemon\n")
+	fmt.Printf("  docktor daemon stop    # Stop daemon\n\n")
+
+	// Block forever - the service monitors run in background
+	select {}
 }
 
 func daemonStop(pidFile string) {
@@ -1494,6 +1965,118 @@ func configSetModel(args []string) {
 	fmt.Printf("  Model:     %s\n", cfg.LLM.Model)
 	fmt.Println()
 	fmt.Printf("Saved to: %s\n", configPath)
+}
+
+func configValidate() {
+	// Load configuration
+	cfg, err := LoadConfig("")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "✗ Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	cfg.Normalize()
+
+	fmt.Println("Validating Docktor configuration...\n")
+
+	allValid := true
+
+	// 1. Check compose file exists
+	composeFile := cfg.ComposeFile
+	if !filepath.IsAbs(composeFile) {
+		wd, _ := os.Getwd()
+		composeFile = filepath.Join(wd, composeFile)
+	}
+
+	if fileExists(composeFile) {
+		fmt.Printf("✓ Compose file exists: %s\n", composeFile)
+	} else {
+		fmt.Printf("✗ Compose file not found: %s\n", composeFile)
+		allValid = false
+	}
+
+	// 2. Check each service
+	for _, svc := range cfg.Services {
+		fmt.Printf("\n[Service: %s]\n", svc.Name)
+
+		// Check service exists in compose file (basic check - just grep for service name)
+		if fileExists(composeFile) {
+			content, _ := os.ReadFile(composeFile)
+			if strings.Contains(string(content), svc.Name+":") {
+				fmt.Printf("  ✓ Service '%s' found in compose file\n", svc.Name)
+			} else {
+				fmt.Printf("  ✗ Service '%s' not found in compose file\n", svc.Name)
+				allValid = false
+			}
+		}
+
+		// Check replica bounds
+		if svc.MinReplicas > 0 && svc.MaxReplicas >= svc.MinReplicas {
+			fmt.Printf("  ✓ Replica bounds valid: %d-%d\n", svc.MinReplicas, svc.MaxReplicas)
+		} else {
+			fmt.Printf("  ✗ Invalid replica bounds: min=%d, max=%d\n", svc.MinReplicas, svc.MaxReplicas)
+			allValid = false
+		}
+
+		// Check queue configuration if present
+		if svc.Queue != nil {
+			fmt.Printf("  [Queue: %s]\n", svc.Queue.Kind)
+
+			// Try to connect to queue
+			queueCfg := queue.Config{
+				Kind: svc.Queue.Kind,
+				URL:  svc.Queue.URL,
+				Attributes: map[string]string{
+					"stream":    svc.Queue.Stream,
+					"consumer":  svc.Queue.Consumer,
+					"subject":   svc.Queue.Subject,
+					"jetstream": fmt.Sprintf("%t", svc.Queue.JetStream),
+				},
+			}
+
+			provider, err := queue.NewProvider(queueCfg)
+			if err != nil {
+				fmt.Printf("    ✗ Queue provider error: %v\n", err)
+				allValid = false
+				continue
+			}
+
+			if err := provider.Connect(); err != nil {
+				fmt.Printf("    ✗ Cannot connect to queue: %v\n", err)
+				allValid = false
+			} else {
+				fmt.Printf("    ✓ Queue reachable: %s\n", svc.Queue.URL)
+
+				// Try to get metrics
+				metrics, err := provider.GetMetrics(5)
+				if err != nil {
+					fmt.Printf("    ✗ Cannot get queue metrics: %v\n", err)
+					allValid = false
+				} else {
+					fmt.Printf("    ✓ Stream '%s' accessible\n", svc.Queue.Stream)
+					fmt.Printf("    ✓ Consumer '%s' accessible (backlog: %.0f)\n", svc.Queue.Consumer, metrics.Backlog)
+				}
+			}
+
+			provider.Close()
+		}
+
+		// Check rules configuration
+		if len(svc.Rules.ScaleUpWhen) > 0 {
+			fmt.Printf("  ✓ Scale-up rules: %d conditions (OR logic)\n", len(svc.Rules.ScaleUpWhen))
+		}
+		if len(svc.Rules.ScaleDownWhen) > 0 {
+			fmt.Printf("  ✓ Scale-down rules: %d conditions (AND logic)\n", len(svc.Rules.ScaleDownWhen))
+		}
+	}
+
+	fmt.Println()
+	if allValid {
+		fmt.Println("✓ All checks passed!")
+	} else {
+		fmt.Println("✗ Some checks failed. Please review the errors above.")
+		os.Exit(1)
+	}
 }
 
 // fetchDMRModels fetches available models from Docker Model Runner

@@ -1,0 +1,66 @@
+version: '3.8'
+
+services:
+  # NATS Server with JetStream enabled
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/nats/data"]
+    ports:
+      - "4222:4222"
+      - "8222:8222"  # HTTP monitoring
+    volumes:
+      - nats-data:/nats/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Producer - publishes messages at configurable rate
+  producer:
+    build:
+      context: ./producer
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      STREAM: EVENTS
+      SUBJECT: events.web
+      RATE: 100              # msgs/sec baseline
+      BURST_RATE: 500        # msgs/sec during bursts
+      BURST_INTERVAL: 60     # seconds between bursts
+      BURST_DURATION: 10     # seconds per burst
+    depends_on:
+      nats:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Consumer - processes messages from NATS JetStream
+  consumer:
+    build:
+      context: ./consumer
+      dockerfile: Dockerfile
+    environment:
+      NATS_URL: nats://nats:4222
+      STREAM: EVENTS
+      CONSUMER: WEB_WORKERS
+      SUBJECT: events.web
+      PROCESS_TIME_MS: 50    # Simulated processing time per message
+      BATCH_SIZE: 10         # Messages to fetch per batch
+    depends_on:
+      nats:
+        condition: service_healthy
+    deploy:
+      replicas: 1
+    restart: unless-stopped
+
+  # Web service (nginx) - scaled based on queue metrics
+  web:
+    image: nginx:alpine
+    expose:
+      - "80"
+    deploy:
+      replicas: 2
+
+volumes:
+  nats-data:
