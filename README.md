@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docktor-logo.png" alt="Docktor Logo" width="400"/>
+  <img src="logo.png" alt="Docktor Logo" width="400"/>
   
   ## AI-Native Autoscaling for Docker
 
