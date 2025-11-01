@@ -52,7 +52,7 @@ func printBanner() {
        | |) / _ \/ _| / /  _|| '_/ _ \| '_|
        |___/\___/\__|_\_\\__||_| \___/|_|
 ` + reset + `
-   🐳 AI-Native Autoscaling for Docker Compose
+   🐳 AI-Native Autoscaling for Containers (built on Docker’s AI stack)
    ` + cyan + `https://github.com/hwclass/docktor` + reset + `
 `)
 }
@@ -139,11 +139,11 @@ type daemonOpts struct {
 // Config represents docktor.yaml configuration
 type Config struct {
 	Version     string          `yaml:"version"`
-	Service     string          `yaml:"service,omitempty"`      // Legacy: single service name (backward compatible)
+	Service     string          `yaml:"service,omitempty"` // Legacy: single service name (backward compatible)
 	ComposeFile string          `yaml:"compose_file"`
-	Scaling     ScalingConfig   `yaml:"scaling,omitempty"`      // Legacy: single service scaling config
+	Scaling     ScalingConfig   `yaml:"scaling,omitempty"` // Legacy: single service scaling config
 	LLM         LLMConfig       `yaml:"llm"`
-	Services    []ServiceConfig `yaml:"services,omitempty"`     // New: multi-service configuration
+	Services    []ServiceConfig `yaml:"services,omitempty"` // New: multi-service configuration
 }
 
 // ScalingConfig holds scaling thresholds and parameters
@@ -180,13 +180,13 @@ type Rules struct {
 
 // QueueConfig holds queue/messaging system configuration
 type QueueConfig struct {
-	Kind       string   `yaml:"kind"`       // "nats", "kafka", "rabbitmq", "sqs"
-	URL        string   `yaml:"url"`        // Connection URL
-	JetStream  bool     `yaml:"jetstream"`  // NATS: use JetStream
-	Stream     string   `yaml:"stream"`     // NATS: stream name
-	Consumer   string   `yaml:"consumer"`   // NATS: consumer name
-	Subject    string   `yaml:"subject"`    // NATS: subject filter
-	Metrics    []string `yaml:"metrics"`    // Metrics to collect: backlog, lag, rate_in, rate_out
+	Kind      string   `yaml:"kind"`      // "nats", "kafka", "rabbitmq", "sqs"
+	URL       string   `yaml:"url"`       // Connection URL
+	JetStream bool     `yaml:"jetstream"` // NATS: use JetStream
+	Stream    string   `yaml:"stream"`    // NATS: stream name
+	Consumer  string   `yaml:"consumer"`  // NATS: consumer name
+	Subject   string   `yaml:"subject"`   // NATS: subject filter
+	Metrics   []string `yaml:"metrics"`   // Metrics to collect: backlog, lag, rate_in, rate_out
 }
 
 // ServiceConfig holds per-service monitoring and scaling configuration
@@ -749,8 +749,8 @@ func mcpToolsList(id json.RawMessage) {
 				"type":                 "object",
 				"additionalProperties": false,
 				"properties": map[string]interface{}{
-					"recommendation":    map[string]interface{}{"type": "string", "enum": []string{"scale_up", "scale_down", "hold"}},
-					"current_replicas":  map[string]interface{}{"type": "integer"},
+					"recommendation":   map[string]interface{}{"type": "string", "enum": []string{"scale_up", "scale_down", "hold"}},
+					"current_replicas": map[string]interface{}{"type": "integer"},
 				},
 				"required": []string{"recommendation", "current_replicas"},
 			},
@@ -813,12 +813,12 @@ func mcpToolsList(id json.RawMessage) {
 					"queue_config": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
-							"kind":       map[string]interface{}{"type": "string"},
-							"url":        map[string]interface{}{"type": "string"},
-							"jetstream":  map[string]interface{}{"type": "boolean"},
-							"stream":     map[string]interface{}{"type": "string"},
-							"consumer":   map[string]interface{}{"type": "string"},
-							"subject":    map[string]interface{}{"type": "string"},
+							"kind":      map[string]interface{}{"type": "string"},
+							"url":       map[string]interface{}{"type": "string"},
+							"jetstream": map[string]interface{}{"type": "boolean"},
+							"stream":    map[string]interface{}{"type": "string"},
+							"consumer":  map[string]interface{}{"type": "string"},
+							"subject":   map[string]interface{}{"type": "string"},
 						},
 						"required": []string{"kind", "url"},
 					},
@@ -834,10 +834,10 @@ func mcpToolsList(id json.RawMessage) {
 				"type":                 "object",
 				"additionalProperties": false,
 				"properties": map[string]interface{}{
-					"service_name":      map[string]interface{}{"type": "string"},
-					"current_replicas":  map[string]interface{}{"type": "integer"},
-					"min_replicas":      map[string]interface{}{"type": "integer"},
-					"max_replicas":      map[string]interface{}{"type": "integer"},
+					"service_name":     map[string]interface{}{"type": "string"},
+					"current_replicas": map[string]interface{}{"type": "integer"},
+					"min_replicas":     map[string]interface{}{"type": "integer"},
+					"max_replicas":     map[string]interface{}{"type": "integer"},
 					"rules": map[string]interface{}{
 						"type": "object",
 						"properties": map[string]interface{}{
@@ -909,8 +909,8 @@ func mcpToolsCall(id json.RawMessage, params json.RawMessage) {
 		})
 	case "calculate_target_replicas":
 		var in struct {
-			Recommendation   string `json:"recommendation"`
-			CurrentReplicas  int    `json:"current_replicas"`
+			Recommendation  string `json:"recommendation"`
+			CurrentReplicas int    `json:"current_replicas"`
 		}
 		_ = json.Unmarshal(p.Arguments, &in)
 		log.Printf("[MCP] calculate_target_replicas(recommendation=%s, current_replicas=%d)", in.Recommendation, in.CurrentReplicas)
@@ -1163,9 +1163,9 @@ func toolCalculateTargetReplicas(recommendation string, currentReplicas int) (ma
 	}
 
 	return map[string]interface{}{
-		"action":          action,
-		"should_scale":    shouldScale,
-		"target_replicas": targetReplicas,
+		"action":           action,
+		"should_scale":     shouldScale,
+		"target_replicas":  targetReplicas,
 		"current_replicas": currentReplicas,
 	}, nil
 }
@@ -1327,12 +1327,12 @@ func toolDecideScaleMulti(serviceName string, currentReplicas, minReplicas, maxR
 	}
 
 	return map[string]interface{}{
-		"action":          action,
-		"target_replicas": targetReplicas,
+		"action":           action,
+		"target_replicas":  targetReplicas,
 		"current_replicas": currentReplicas,
-		"reason":          reason,
-		"policy":          "multi-metric evaluation",
-		"matched_rules":   matchedRules,
+		"reason":           reason,
+		"policy":           "multi-metric evaluation",
+		"matched_rules":    matchedRules,
 	}, nil
 }
 

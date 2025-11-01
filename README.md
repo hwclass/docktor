@@ -1,7 +1,7 @@
 <div align="center">
   <img src="logo.png" alt="Docktor Logo" width="400"/>
   
-  ## AI-Native Autoscaling for Docker
+  ## AI-Native Autoscaling for Containers (built on Docker’s AI stack)
 
   **Autonomous SRE agent that monitors and scales Docker Compose services using LLMs and MCP.**
 
@@ -916,6 +916,8 @@ Contributions welcome! Areas to help:
 ## License
 
 MIT License - See [LICENSE](LICENSE) file
+
+_Disclaimer: Docktor is an independent open-source project built by the community. It is not affiliated with or endorsed by Docker, Inc._
 
 ---
 
